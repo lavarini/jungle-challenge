@@ -382,3 +382,39 @@ func TestDistinctWalletsProgressWhileOneIsLocked(t *testing.T) {
 		t.Fatalf("locked wallet error = %v, want ErrTransient", err)
 	}
 }
+
+// A panic inside fn must still release the row lock: UnitOfWork.Do's deferred
+// rollback runs unconditionally, not only when fn returns a non-nil error.
+func TestPanicInsideUnitOfWorkReleasesTheLock(t *testing.T) {
+	s := newStack(t)
+	ctx := context.Background()
+	v := openWallet(t, s, "100.00")
+	uow := postgres.NewUnitOfWork(s.pool)
+
+	panicked := func() (panicked bool) {
+		defer func() {
+			if recover() != nil {
+				panicked = true
+			}
+		}()
+		_ = uow.Do(ctx, func(ctx context.Context, tx app.Tx) error {
+			if _, err := tx.Wallets().GetForUpdate(ctx, v.ID); err != nil {
+				t.Fatal(err)
+			}
+			panic("boom: simulated crash while holding the wallet lock")
+		})
+		return false
+	}()
+	if !panicked {
+		t.Fatal("expected fn to panic")
+	}
+
+	fresh := newStack(t)
+	res, err := fresh.submit.Execute(ctx, command(t, v, wagering.Bet, "10.00", uuid.NewString()))
+	if err != nil {
+		t.Fatalf("wallet still locked after a panic in a previous transaction: %v", err)
+	}
+	if res.Status != wagering.Processed || res.Balance.String() != "90.00" {
+		t.Fatalf("result %+v", res)
+	}
+}

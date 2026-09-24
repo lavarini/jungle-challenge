@@ -17,20 +17,24 @@ type UnitOfWork struct {
 
 func NewUnitOfWork(pool *pgxpool.Pool) *UnitOfWork { return &UnitOfWork{pool: pool} }
 
-// Do runs fn in one READ COMMITTED transaction. A failed commit is reported as
-// transient: its outcome is unknown and a retry resolves through idempotency.
+// Do runs fn in one READ COMMITTED transaction. A failed commit is classified
+// like any other error: transient when the outcome is unknown (e.g. the
+// connection dropped), invariant violation when a deferred trigger rejected
+// it at commit time.
 func (u *UnitOfWork) Do(ctx context.Context, fn func(ctx context.Context, tx app.Tx) error) (err error) {
 	tx, err := u.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return classify(err)
 	}
+	// Unconditional: also runs when fn panics, so the row lock held by this
+	// transaction (e.g. SELECT ... FOR UPDATE) is always released instead of
+	// starving every later writer to lock_timeout. After a successful Commit
+	// this Rollback is a harmless no-op (pgx returns ErrTxClosed); ignored.
+	// Detached from ctx so it still runs after the caller's context is done.
 	defer func() {
-		if err != nil {
-			// Detached from ctx so the rollback runs even after cancellation.
-			rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-			defer cancel()
-			_ = tx.Rollback(rbCtx)
-		}
+		rbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_ = tx.Rollback(rbCtx)
 	}()
 	if err = fn(ctx, pgTx{tx: tx}); err != nil {
 		return classify(err)
