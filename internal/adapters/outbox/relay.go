@@ -109,6 +109,13 @@ func (r *Relay) deliver(ctx context.Context, m Message, claim string, leaseUntil
 	pctx, cancel := context.WithDeadline(ctx, leaseUntil)
 	perr := r.pub.Publish(pctx, m)
 	cancel()
+	if perr != nil && ctx.Err() != nil {
+		// Shutdown cut the publish short: the event did not fail, and
+		// bookkeeping under a cancelled context would fail too. The lease
+		// expires and the event is claimed again, with the same eventId.
+		log.InfoContext(context.WithoutCancel(ctx), "publish interrupted by shutdown; the lease will expire", "error", perr.Error())
+		return
+	}
 	var applied bool
 	var serr error
 	switch {

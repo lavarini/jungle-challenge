@@ -26,28 +26,28 @@ var referenceWorkerModule = fx.Module("reference-worker",
 	fx.Invoke(runReferenceWorker),
 )
 
-func runReferenceWorker(lc fx.Lifecycle, cfg config.Config, r *app.ResolvePending, l *slog.Logger) {
+func runReferenceWorker(lc fx.Lifecycle, d *drain, cfg config.Config, r *app.ResolvePending, l *slog.Logger) {
 	w := refworker.New(r, refworker.Config{Interval: cfg.Workers.PollInterval, Lease: cfg.Workers.Lease, Batch: cfg.Workers.Batch}, l)
-	runLoop(lc, w.Loop)
+	runLoop(lc, d, "reference-worker", w.Loop)
 }
 
 var consumerModule = fx.Module("consumer",
 	fx.Invoke(runConsumer),
 )
 
-func runConsumer(lc fx.Lifecycle, cfg config.Config, client *sqs.Client, submit *app.SubmitWager, l *slog.Logger) {
+func runConsumer(lc fx.Lifecycle, d *drain, cfg config.Config, client *sqs.Client, submit *app.SubmitWager, l *slog.Logger) {
 	c := sqsin.New(client, submit, sqsin.Config{
 		QueueURL: cfg.AWS.WagerQueueURL, DLQURL: cfg.AWS.DLQURL, Senders: cfg.AWS.Senders,
 		MaxMessages: 10, WaitSeconds: 20, MaxVisibility: 60 * time.Second, MaxReceives: cfg.AWS.MaxReceives,
 	}, l)
-	runLoop(lc, c.Loop)
+	runLoop(lc, d, "consumer", c.Loop)
 }
 
 var outboxRelayModule = fx.Module("outbox-relay",
 	fx.Invoke(runOutboxRelay),
 )
 
-func runOutboxRelay(lc fx.Lifecycle, cfg config.Config, pool *pgxpool.Pool, clock app.Clock, l *slog.Logger) error {
+func runOutboxRelay(lc fx.Lifecycle, d *drain, cfg config.Config, pool *pgxpool.Pool, clock app.Clock, l *slog.Logger) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	client, err := platform.NewSNSClient(ctx, cfg.AWS.Region)
@@ -63,16 +63,15 @@ func runOutboxRelay(lc fx.Lifecycle, cfg config.Config, pool *pgxpool.Pool, cloc
 		Interval: cfg.Workers.PollInterval, Lease: cfg.Workers.Lease, Batch: cfg.Workers.Batch,
 		MaxPermanentAttempts: 5, InitialBackoff: time.Second, MaxBackoff: 5 * time.Minute,
 	}, clock.Now, uuid.NewString, l)
-	runLoop(lc, r.Loop)
+	runLoop(lc, d, "outbox-relay", r.Loop)
 	return nil
 }
 
-// runLoop ties a worker loop to the Fx lifecycle. Registered after the pool,
-// so it stops before the pool closes.
-func runLoop(lc fx.Lifecycle, loop runner.Loop) {
-	var r *runner.Runner
-	lc.Append(fx.Hook{
-		OnStart: func(context.Context) error { r = runner.Start(loop); return nil },
-		OnStop:  func(ctx context.Context) error { return r.Stop(ctx) },
-	})
+// runLoop starts a worker loop with the app and hands its two-phase stop to
+// the drain, which stops every worker and the HTTP server concurrently.
+func runLoop(lc fx.Lifecycle, d *drain, name string, loop runner.Loop) {
+	lc.Append(fx.StartHook(func() {
+		r := runner.Start(loop)
+		d.add(name, r.Stop)
+	}))
 }

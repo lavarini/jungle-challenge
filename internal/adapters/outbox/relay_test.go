@@ -146,3 +146,41 @@ func TestLostClaimIsNotAnError(t *testing.T) {
 		t.Fatal("a fenced write (applied=false) must log that the claim was lost")
 	}
 }
+
+// hungPublisher blocks like an SNS call into a network black hole: it returns
+// only when its context ends.
+type hungPublisher struct{ started chan struct{} }
+
+func (p hungPublisher) Publish(ctx context.Context, _ Message) error {
+	close(p.started)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// A publish is bounded by the lease and by the work context: once shutdown
+// cancels work, a hung publish returns at once, and the relay leaves the
+// lease to expire instead of writing bookkeeping with a dead context.
+func TestWorkCancellationAbortsAHungPublish(t *testing.T) {
+	store := &fakeStore{applied: true, msgs: []Message{{Seq: 1, Attempts: 1}, {Seq: 2, Attempts: 1}}}
+	pub := hungPublisher{started: make(chan struct{})}
+	// A real clock keeps the lease 30s ahead, so only work can end the publish.
+	r := New(store, pub, Config{Interval: time.Millisecond, Lease: 30 * time.Second, Batch: 10, MaxPermanentAttempts: 3,
+		InitialBackoff: time.Second, MaxBackoff: time.Minute, Jitter: identityJitter},
+		time.Now, func() string { return "claim-1" }, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	run, stopRun := context.WithCancel(context.Background())
+	work, stopWork := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); r.Loop(run, work) }()
+
+	<-pub.started
+	stopRun()
+	stopWork()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a hung publish outlived the work cancellation")
+	}
+	if len(store.calls) != 0 {
+		t.Fatalf("calls = %+v, want none: the lease expires and the event is retried", store.calls)
+	}
+}
