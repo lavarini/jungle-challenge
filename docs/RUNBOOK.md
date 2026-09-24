@@ -105,7 +105,7 @@ Vencido o prazo, vira `REJECTED` com `REFERENCE_NOT_FOUND`.
 subindo.
 
 1. `retried` alto: SNS indisponível ou credencial sem permissão. Ver o log do relay (o aviso de
-   retry tem limite de taxa). O relay recua até 5 min e não perde nada.
+   retry tem limite de taxa). O relay recua até cerca de 5 min (teto mais jitter) e não perde nada.
 2. Retries zerados e lag crescendo: nenhum relay rodando. Conferir se algum processo tem o papel
    `outbox-relay`. Se o relay não sobe, o log diz por quê: tópico inexistente ou não FIFO.
 3. `outbox_claim_lost_total` subindo: leases vencendo antes do fim da publicação. Aumentar

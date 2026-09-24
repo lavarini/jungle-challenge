@@ -22,6 +22,12 @@ com `InvalidParameter`.
 `api.json` e `reference-worker.json` só têm a declaração `ReadinessProbe`: fora
 da prontidão, nenhum código desses dois papéis chama a SDK da AWS.
 
+## Papel `all`
+
+O Compose roda `WAGERD_ROLE=all`, que junta os quatro papéis num processo. A credencial desse
+processo precisa da união das quatro políticas. Em produção, a separação vem de rodar cada papel
+com a própria credencial.
+
 ## ARNs
 
 Os ARNs abaixo são os do ambiente local (LocalStack, conta `000000000000`,
@@ -47,8 +53,10 @@ equivalente) em vez de copiar os JSONs literalmente.
   qualquer ação em qualquer recurso. A separação real depende de uma
   credencial por papel, que o Compose local não provisiona (trade-off
   documentado no ADR 0016). O teste em `internal/archtest/iam_test.go` prova
-  apenas que cada arquivo é um JSON válido e contém exatamente o conjunto de
-  ações esperado — não prova imposição em runtime.
+  que cada arquivo é JSON válido e contém exatamente o conjunto de ações da
+  tabela esperada por papel. A tabela foi levantada das chamadas à SDK de cada
+  papel, e o teste não a deriva do código. Ele também não prova imposição em
+  runtime.
 - **Sem wildcards.** Nenhuma política aqui usa `"*"` em `Action` ou em
   `Resource`; o teste de arquitetura falha se algum arquivo introduzir um.
 - **Prontidão.** Todo papel responde `/health/ready`, que verifica o Postgres e

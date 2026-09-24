@@ -52,6 +52,8 @@ paths:
           content: { application/json: { schema: { $ref: "#/components/schemas/Wallet" } } }
         "400": { $ref: "#/components/responses/Problem" }
         "401": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
   /wallets/{walletId}:
@@ -65,6 +67,8 @@ paths:
           content: { application/json: { schema: { $ref: "#/components/schemas/Wallet" } } }
         "400": { $ref: "#/components/responses/Problem" }
         "401": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
   /wallets/{walletId}/ledger:
@@ -93,6 +97,8 @@ paths:
                   nextCursor: { type: string, description: ausente na última página }
         "400": { $ref: "#/components/responses/Problem" }
         "401": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
   /wallets/{walletId}/reconciliation:
@@ -106,6 +112,8 @@ paths:
           content: { application/json: { schema: { $ref: "#/components/schemas/Reconciliation" } } }
         "400": { $ref: "#/components/responses/Problem" }
         "401": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
   /wagering/transactions:
@@ -137,10 +145,11 @@ paths:
           description: aguardando a referência (`PENDING_REFERENCE`)
           content: { application/json: { schema: { $ref: "#/components/schemas/SubmitResult" } } }
         "422":
-          description: rejeição definitiva persistida; o replay devolve a mesma rejeição
+          description: rejeição definitiva persistida (REJECTED) ou operação FAILED por violação de invariante; o replay devolve o mesmo desfecho
           content: { application/json: { schema: { $ref: "#/components/schemas/SubmitResult" } } }
         "400": { $ref: "#/components/responses/Problem" }
         "401": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
@@ -160,6 +169,8 @@ paths:
           content: { application/json: { schema: { $ref: "#/components/schemas/Transaction" } } }
         "400": { $ref: "#/components/responses/Problem" }
         "401": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
   /providers/{providerId}/wagering/transactions/{externalTransactionId}:
@@ -181,6 +192,8 @@ paths:
           content: { application/json: { schema: { $ref: "#/components/schemas/Transaction" } } }
         "400": { $ref: "#/components/responses/Problem" }
         "401": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
         "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
 components:
@@ -228,7 +241,7 @@ components:
       enum: [PROCESSED, REJECTED, PENDING_REFERENCE, FAILED]
     FailureCode:
       type: string
-      description: rejeição definitiva persistida
+      description: rejeição definitiva persistida; INVARIANT_VIOLATION acompanha FAILED
       enum:
         - BET_INSUFFICIENT_FUNDS
         - REVERSAL_INSUFFICIENT_FUNDS
@@ -236,11 +249,12 @@ components:
         - REFERENCE_MISMATCH
         - REFERENCE_NOT_PROCESSED
         - REFERENCE_NOT_FOUND
+        - INVARIANT_VIOLATION
     SubmitRequest:
       type: object
       required: [providerId, externalTransactionId, playerId, walletId, roundId, gameId, kind, money]
       properties:
-        providerId: { type: string }
+        providerId: { type: string, maxLength: 255 }
         externalTransactionId: { type: string, maxLength: 255 }
         playerId: { $ref: "#/components/schemas/Uuid" }
         walletId: { $ref: "#/components/schemas/Uuid" }

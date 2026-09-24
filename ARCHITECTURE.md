@@ -49,8 +49,9 @@ caminhos de dinheiro.
      ([ADR 0010](docs/adr/0010-referencias-pendentes-com-prazo.md)).
 5. **Escrita**, sempre nesta ordem: transação, carteira, ledger, outbox, inbox, tudo no mesmo
    commit.
-6. **Depois do commit.** O relay publica no SNS FIFO, e as pendências que esperavam essa
-   referência são despertadas.
+6. **Despertar e publicação.** As pendências que esperavam essa referência são despertadas na
+   mesma transação (`next_attempt_at = now`), e o resolvedor as pega logo após o commit. O relay
+   publica no SNS FIFO depois do commit.
 
 ## Garantias e onde são impostas
 
@@ -67,7 +68,7 @@ caminhos de dinheiro.
 | Mensagem inválida não bloqueia a carteira | DLQ explícita com motivo; `RETRIES_EXHAUSTED` antes do redrive nativo | [0013](docs/adr/0013-dlq-explicita-para-mensagem-invalida.md) |
 | `FAILED` só por invariante | só `ErrInvariantViolation` leva a `FAILED`; infraestrutura é sempre transitória | [0011](docs/adr/0011-failed-e-violacao-de-invariante.md) |
 | Autorização por rota e isolamento entre providers | OIDC fail-closed; leitura fora do escopo responde 404 | [0015](docs/adr/0015-oidc-fail-closed-e-politica-por-rota.md) |
-| Privilégio mínimo na AWS | uma política IAM por papel, testada contra as chamadas do código | [0016](docs/adr/0016-credenciais-do-broker-e-vinculo-do-remetente.md) |
+| Privilégio mínimo na AWS | uma política IAM por papel, conferida por teste contra a tabela de ações de cada papel, sem curinga | [0016](docs/adr/0016-credenciais-do-broker-e-vinculo-do-remetente.md) |
 
 ## Falhas
 
@@ -77,7 +78,7 @@ caminhos de dinheiro.
 | Queda depois de publicar, antes de confirmar | lease expira; republicação com o mesmo `eventId`, deduplicada |
 | Queda depois de reclamar uma pendência | lease expira; outra instância retoma |
 | PostgreSQL indisponível | HTTP `503` com `retryable=true`; SQS devolve à fila com backoff; workers recuam |
-| SNS indisponível ou mal configurado | relay recua até 5 min sem descartar; no boot recusa tópico inexistente ou não FIFO |
+| SNS indisponível ou mal configurado | relay recua até cerca de 5 min (teto mais jitter) sem descartar; no boot recusa tópico inexistente ou não FIFO |
 | `SIGTERM` | prontidão vira 503; HTTP e workers drenam em paralelo; mensagem interrompida volta com visibilidade 0; pool fecha por último |
 
 As janelas de queda são provadas com processos reais e failpoints compilados só com
@@ -93,8 +94,8 @@ cardinalidade aparece em rótulos. O [RUNBOOK](docs/RUNBOOK.md) diz o que fazer 
 ## Limitações conhecidas
 
 - **Uma credencial AWS e um papel de banco por processo, não por papel.** As políticas IAM por
-  papel existem e são testadas, mas o Compose local usa uma só credencial, e o LocalStack não
-  aplica IAM.
+  papel existem e são testadas, mas o Compose local roda o papel `all` com uma só credencial
+  (a união das quatro políticas), e o LocalStack não aplica IAM.
 - **A ordem de eventos quebra na quarentena.** Um evento em quarentena libera o seguinte da mesma
   carteira. Isso é aceito e documentado no ADR 0014 e no RUNBOOK.
 - **Contador de recebimentos do SQS.** Uma mensagem retida atrás de uma cabeça de grupo que falha

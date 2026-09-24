@@ -36,7 +36,7 @@ docker compose --profile multi down -v
 | `make test-race` | testes unitários com `-race`, sem containers |
 | `make test-integration` | PostgreSQL, Keycloak e LocalStack reais via testcontainers |
 | `make test-e2e` | três processos `wagerd` independentes contra a mesma infraestrutura |
-| `make test-crash` | quedas com `kill -9` nas janelas de commit, publicação e claim; reinício e `SIGTERM` |
+| `make test-crash` | queda abrupta (`os.Exit(137)` por failpoint) nas janelas de commit, publicação e claim; `SIGKILL` e reinício; `SIGTERM` |
 | `make test-failpoint` | testes do pacote de failpoints com `-tags failpoint` |
 | `make evidence` | roda todas as suítes com `-json` e regenera `docs/EVIDENCIAS.md` (~4 min) |
 
@@ -69,10 +69,11 @@ Produtores são identificados pela credencial: no LocalStack, a access key
 (`SQS_SENDER_PROVIDERS`). Enviar uma aposta pela fila:
 
 ```sh
+MSG_ID=$(uuidgen | tr A-Z a-z)
 AWS_ACCESS_KEY_ID=111111111111 AWS_SECRET_ACCESS_KEY=test aws --endpoint-url http://localhost:4566 \
   sqs send-message --queue-url http://localhost:4566/000000000000/wager-transactions.fifo \
-  --message-group-id <walletId> --message-deduplication-id "$(uuidgen)" \
-  --message-body '{"messageId":"'"$(uuidgen)"'","type":"WagerTransactionRequested","occurredAt":"2026-09-24T12:00:00Z","data":{...}}'
+  --message-group-id <walletId> --message-deduplication-id "$MSG_ID" \
+  --message-body '{"messageId":"'"$MSG_ID"'","type":"WagerTransactionRequested","occurredAt":"2026-09-24T12:00:00Z","data":{...}}'
 ```
 
 O envelope completo e os desfechos de cada mensagem estão em

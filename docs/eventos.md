@@ -108,7 +108,7 @@ desfecho da transação e o `WalletBalanceChanged`.
 - **Fencing.** A confirmação só é aplicada por quem ainda detém o `claim_id`. Um relay cujo lease
   expirou não sobrescreve o trabalho de quem assumiu.
 - **Falha transitória** (SNS indisponível, tópico ou permissão ausentes): retry com backoff
-  exponencial, jitter de até 20% e teto de 5 min. O evento nunca é descartado.
+  exponencial com teto de 5 min e jitter de até 20% sobre o teto. O evento nunca é descartado.
 - **Falha permanente** (requisição malformada) após 5 tentativas: quarentena (`dead_at` e
   `last_error`). A partição segue para o próximo evento, e a métrica `outbox_dead_total` sobe (ver
   [RUNBOOK](RUNBOOK.md)).
