@@ -20,6 +20,7 @@ type fakeStore struct {
 	msgs    []Message
 	calls   []call
 	applied bool
+	err     error
 }
 
 func (f *fakeStore) ClaimHeads(_ context.Context, _ time.Time, _ int, _ string, _ time.Time) ([]Message, error) {
@@ -29,15 +30,15 @@ func (f *fakeStore) ClaimHeads(_ context.Context, _ time.Time, _ int, _ string, 
 }
 func (f *fakeStore) Ack(_ context.Context, seq int64, claim string, _ time.Time) (bool, error) {
 	f.calls = append(f.calls, call{op: "ack", seq: seq, claim: claim})
-	return f.applied, nil
+	return f.applied, f.err
 }
 func (f *fakeStore) Retry(_ context.Context, seq int64, claim string, next time.Time, _ string) (bool, error) {
 	f.calls = append(f.calls, call{op: "retry", seq: seq, claim: claim, next: next})
-	return f.applied, nil
+	return f.applied, f.err
 }
 func (f *fakeStore) Dead(_ context.Context, seq int64, claim string, _ time.Time, _ string) (bool, error) {
 	f.calls = append(f.calls, call{op: "dead", seq: seq, claim: claim})
-	return f.applied, nil
+	return f.applied, f.err
 }
 
 type fakePublisher struct{ errs map[int64]error }
@@ -182,5 +183,89 @@ func TestWorkCancellationAbortsAHungPublish(t *testing.T) {
 	}
 	if len(store.calls) != 0 {
 		t.Fatalf("calls = %+v, want none: the lease expires and the event is retried", store.calls)
+	}
+}
+
+type countingObserver struct {
+	published, retried, quarantined, claimLost, bookkeeping, publishes int
+}
+
+func (o *countingObserver) Published()                    { o.published++ }
+func (o *countingObserver) Retried()                      { o.retried++ }
+func (o *countingObserver) Quarantined()                  { o.quarantined++ }
+func (o *countingObserver) ClaimLost()                    { o.claimLost++ }
+func (o *countingObserver) BookkeepingFailed()            { o.bookkeeping++ }
+func (o *countingObserver) PublishDuration(time.Duration) { o.publishes++ }
+
+func observedRelay(store Store, pub Publisher, o Observer, log *slog.Logger) *Relay {
+	return New(store, pub, Config{Interval: time.Millisecond, Lease: 30 * time.Second, Batch: 10, MaxPermanentAttempts: 3,
+		InitialBackoff: time.Second, MaxBackoff: time.Minute, Jitter: identityJitter, Observer: o},
+		func() time.Time { return t0 }, func() string { return "claim-1" }, log)
+}
+
+func quietLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+func TestObserverSeesEachAppliedOutcome(t *testing.T) {
+	o := &countingObserver{}
+	store := &fakeStore{applied: true, msgs: []Message{{Seq: 1, Attempts: 1}, {Seq: 2, Attempts: 1}, {Seq: 3, Attempts: 3}}}
+	pub := fakePublisher{errs: map[int64]error{2: errors.New("throttled"), 3: ErrPermanent}}
+	if _, err := observedRelay(store, pub, o, quietLog()).Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if o.published != 1 || o.retried != 1 || o.quarantined != 1 || o.claimLost != 0 || o.publishes != 3 {
+		t.Fatalf("observer = %+v", *o)
+	}
+}
+
+// A Dead fenced off by another relay did not quarantine anything: the other
+// relay's outcome stands, so it counts as a lost claim, not as a quarantine.
+func TestFencedDeadIsNotAQuarantine(t *testing.T) {
+	o := &countingObserver{}
+	store := &fakeStore{applied: false, msgs: []Message{{Seq: 1, Attempts: 3}}}
+	pub := fakePublisher{errs: map[int64]error{1: ErrPermanent}}
+	if _, err := observedRelay(store, pub, o, quietLog()).Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if o.quarantined != 0 || o.claimLost != 1 {
+		t.Fatalf("observer = %+v", *o)
+	}
+}
+
+func TestFailedBookkeepingIsCounted(t *testing.T) {
+	o := &countingObserver{}
+	store := &fakeStore{err: errors.New("db down"), msgs: []Message{{Seq: 1, Attempts: 1}}}
+	if _, err := observedRelay(store, fakePublisher{}, o, quietLog()).Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if o.bookkeeping != 1 || o.published != 0 {
+		t.Fatalf("observer = %+v", *o)
+	}
+}
+
+// While SNS is down every head fails on every tick; the retry warning is rate
+// limited so the outage does not flood the logs.
+func TestRetryLogIsRateLimited(t *testing.T) {
+	rec := &recordingHandler{}
+	var msgs []Message
+	errs := map[int64]error{}
+	for i := int64(1); i <= 10; i++ {
+		msgs = append(msgs, Message{Seq: i, Attempts: 1})
+		errs[i] = errors.New("sns unavailable")
+	}
+	store := &fakeStore{applied: true, msgs: msgs}
+	if _, err := observedRelay(store, fakePublisher{errs: errs}, nil, slog.New(rec)).Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var retries int
+	for _, r := range rec.records {
+		if r.Message == "publish failed; will retry" {
+			retries++
+		}
+	}
+	if retries != 1 {
+		t.Fatalf("retry warnings = %d, want 1 within the rate limit window", retries)
+	}
+	if len(store.calls) != 10 {
+		t.Fatalf("calls = %d, want every event rescheduled", len(store.calls))
 	}
 }

@@ -77,7 +77,9 @@ func (s *SubmitWager) fromInbox(ctx context.Context, tx Tx, ref *InboxRef) (Subm
 	if t == nil {
 		return SubmitResult{}, false, fmt.Errorf("%w: inbox points to missing transaction %s", ErrInvariantViolation, rec.TransactionID)
 	}
-	return resultOf(t, true), true, nil
+	res := resultOf(t, true)
+	res.FromInbox = true
+	return res, true, nil
 }
 
 func (s *SubmitWager) submit(ctx context.Context, tx Tx, cmd SubmitCommand, hash []byte) (SubmitResult, error) {

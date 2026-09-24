@@ -5,8 +5,10 @@ package integration
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,6 +46,7 @@ func processEnv(t *testing.T, addr string) map[string]string {
 		"SQS_WAGER_QUEUE_URL": queueURL, "SHUTDOWN_TIMEOUT": "10s",
 		"SQS_WAGER_DLQ_URL": dlqURL, "SQS_SENDER_PROVIDERS": "111111111111=provider-a",
 		"SNS_EVENTS_TOPIC_ARN": "arn:aws:sns:us-east-1:000000000000:wallet-events.fifo",
+		"ADMIN_ADDR":           freeAddr(t),
 	}
 }
 
@@ -78,6 +81,18 @@ func TestFxLifecycleStartsServesAndStopsCleanly(t *testing.T) {
 		t.Fatalf("ready = %d", resp.StatusCode)
 	}
 
+	// The admin port serves metrics (spec §7 names, preset at zero) and
+	// readiness for worker-only roles.
+	admin := vars["ADMIN_ADDR"]
+	body := get(t, fmt.Sprintf("http://%s/metrics", admin), http.StatusOK)
+	for _, name := range []string{"wager_transactions_total", "outbox_publish_total", "sqs_dlq_total", "pending_references", "outbox_lag_seconds", "go_goroutines"} {
+		if !strings.Contains(body, name) {
+			t.Errorf("/metrics lacks %s", name)
+		}
+	}
+	get(t, fmt.Sprintf("http://%s/health/ready", admin), http.StatusOK)
+	get(t, fmt.Sprintf("http://%s/debug/pprof/", admin), http.StatusOK)
+
 	stopCtx, cancelStop := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancelStop()
 	if err := app.Stop(stopCtx); err != nil {
@@ -85,6 +100,9 @@ func TestFxLifecycleStartsServesAndStopsCleanly(t *testing.T) {
 	}
 	if _, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
 		t.Fatal("server still accepting connections after stop")
+	}
+	if _, err := net.DialTimeout("tcp", admin, time.Second); err == nil {
+		t.Fatal("admin server still accepting connections after stop")
 	}
 	if err := pool.Ping(context.Background()); err == nil {
 		t.Fatal("pool still open after stop")
@@ -94,4 +112,21 @@ func TestFxLifecycleStartsServesAndStopsCleanly(t *testing.T) {
 		goleak.IgnoreAnyFunction("net/http.(*persistConn).writeLoop"),
 		goleak.IgnoreAnyFunction("internal/poll.runtime_pollWait"),
 	)
+}
+
+func get(t *testing.T, url string, want int) string {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != want {
+		t.Fatalf("GET %s = %d, want %d", url, resp.StatusCode, want)
+	}
+	return string(b)
 }

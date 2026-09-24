@@ -16,6 +16,7 @@ func Options(cfg config.Config) fx.Option {
 		fx.Supply(cfg),
 		fx.WithLogger(func(l *slog.Logger) fxevent.Logger { return &fxevent.SlogLogger{Logger: l} }),
 		coreModule,
+		observabilityModule,
 	}
 	if cfg.Role.Runs(config.RoleAPI) {
 		opts = append(opts, apiModule)
@@ -28,6 +29,9 @@ func Options(cfg config.Config) fx.Option {
 	}
 	if cfg.Role.Runs(config.RoleOutboxRelay) {
 		opts = append(opts, outboxRelayModule)
+	}
+	if cfg.Role.Runs(config.RoleOutboxRelay) || cfg.Role.Runs(config.RoleReferenceWorker) {
+		opts = append(opts, fx.Invoke(runBacklogGauges))
 	}
 	return fx.Options(opts...)
 }

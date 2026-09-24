@@ -155,11 +155,16 @@ type Reconciliation struct {
 }
 
 type Reconcile struct {
-	reader Reconciler
-	log    *slog.Logger
+	reader       Reconciler
+	log          *slog.Logger
+	onDivergence func()
 }
 
-func NewReconcile(r Reconciler, log *slog.Logger) *Reconcile { return &Reconcile{reader: r, log: log} }
+// NewReconcile takes an optional onDivergence hook (nil disables it) through
+// which the composition root counts divergences without app knowing metrics.
+func NewReconcile(r Reconciler, log *slog.Logger, onDivergence func()) *Reconcile {
+	return &Reconcile{reader: r, log: log, onDivergence: onDivergence}
+}
 
 // Execute rebuilds the balance from the ledger and compares; it never writes.
 // Difference is stored minus calculated. It also checks, from the same
@@ -196,6 +201,9 @@ func (r *Reconcile) Execute(ctx context.Context, walletID string) (Reconciliatio
 		r.log.ErrorContext(ctx, "reconciliation divergence", "walletId", walletID,
 			"stored", tot.Stored.String(), "calculated", calc.String(), "difference", diff.String(),
 			"versionMismatch", versionMismatch, "chainMismatch", chainMismatch, "currencyMismatches", tot.CurrencyMismatches)
+		if r.onDivergence != nil {
+			r.onDivergence()
+		}
 	}
 	return res, nil
 }

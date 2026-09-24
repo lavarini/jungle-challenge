@@ -79,14 +79,21 @@ type WorkersConfig struct {
 }
 
 type Config struct {
-	Role            Role
-	HTTPAddr        string
+	Role     Role
+	HTTPAddr string
+	// AdminAddr serves /metrics, /debug/pprof and readiness; never published
+	// outside the host network (ADR 0015).
+	AdminAddr       string
 	ShutdownTimeout time.Duration
-	Database        DatabaseConfig
-	OIDC            OIDCConfig
-	AWS             AWSConfig
-	Reference       ReferenceConfig
-	Workers         WorkersConfig
+	// ShutdownReadinessDelay is how long the process keeps serving after it
+	// starts reporting 503, so a load balancer sees not-ready before the port
+	// closes. 0 disables it (tests).
+	ShutdownReadinessDelay time.Duration
+	Database               DatabaseConfig
+	OIDC                   OIDCConfig
+	AWS                    AWSConfig
+	Reference              ReferenceConfig
+	Workers                WorkersConfig
 }
 
 // Load reads configuration and reports every problem at once.
@@ -116,6 +123,7 @@ func Load(getenv func(string) string) (Config, error) {
 	c := Config{
 		Role:            Role(str("WAGERD_ROLE", string(RoleAll))),
 		HTTPAddr:        str("HTTP_ADDR", ":8080"),
+		AdminAddr:       str("ADMIN_ADDR", ":9090"),
 		ShutdownTimeout: duration("SHUTDOWN_TIMEOUT", "25s"),
 		Database: DatabaseConfig{
 			URL:              required("DATABASE_URL"),
@@ -142,6 +150,15 @@ func Load(getenv func(string) string) (Config, error) {
 		},
 	}
 	c.OIDC.DiscoveryURL = str("OIDC_DISCOVERY_URL", c.OIDC.IssuerURL)
+
+	delay, err := time.ParseDuration(str("SHUTDOWN_READINESS_DELAY", "0s"))
+	switch {
+	case err != nil || delay < 0:
+		errs = append(errs, errors.New("SHUTDOWN_READINESS_DELAY must be a non-negative duration"))
+	case delay >= c.ShutdownTimeout:
+		errs = append(errs, errors.New("SHUTDOWN_READINESS_DELAY must be below SHUTDOWN_TIMEOUT"))
+	}
+	c.ShutdownReadinessDelay = delay
 
 	maxConns, err := strconv.ParseInt(str("DB_MAX_CONNS", "20"), 10, 32)
 	if err != nil || maxConns < 1 {

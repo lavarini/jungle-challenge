@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/lavarini/backend-challenge-go/internal/app"
 	"github.com/lavarini/backend-challenge-go/internal/wagering"
@@ -26,6 +27,8 @@ type fakeSQS struct {
 	deleted    []string
 	dlq        []*sqs.SendMessageInput
 	visibility map[string]int32
+
+	failSend, failDelete, failVisibility bool
 }
 
 func (f *fakeSQS) ReceiveMessage(ctx context.Context, in *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
@@ -39,6 +42,9 @@ func (f *fakeSQS) ReceiveMessage(ctx context.Context, in *sqs.ReceiveMessageInpu
 func (f *fakeSQS) DeleteMessage(ctx context.Context, in *sqs.DeleteMessageInput, _ ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failDelete {
+		return nil, errors.New("delete refused")
+	}
 	f.deleted = append(f.deleted, aws.ToString(in.ReceiptHandle))
 	return &sqs.DeleteMessageOutput{}, nil
 }
@@ -46,6 +52,9 @@ func (f *fakeSQS) DeleteMessage(ctx context.Context, in *sqs.DeleteMessageInput,
 func (f *fakeSQS) ChangeMessageVisibility(ctx context.Context, in *sqs.ChangeMessageVisibilityInput, _ ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failVisibility {
+		return nil, errors.New("visibility refused")
+	}
 	f.visibility[aws.ToString(in.ReceiptHandle)] = in.VisibilityTimeout
 	return &sqs.ChangeMessageVisibilityOutput{}, nil
 }
@@ -53,6 +62,9 @@ func (f *fakeSQS) ChangeMessageVisibility(ctx context.Context, in *sqs.ChangeMes
 func (f *fakeSQS) SendMessage(ctx context.Context, in *sqs.SendMessageInput, _ ...func(*sqs.Options)) (*sqs.SendMessageOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failSend {
+		return nil, errors.New("send refused")
+	}
 	f.dlq = append(f.dlq, in)
 	return &sqs.SendMessageOutput{}, nil
 }
@@ -249,6 +261,94 @@ func TestMessageInterruptedByShutdownIsReleasedImmediately(t *testing.T) {
 	}
 	if len(f.dlq) != 0 || len(f.deleted) != 0 {
 		t.Fatalf("an interrupted message must stay in the queue: dlq %d deleted %v", len(f.dlq), f.deleted)
+	}
+}
+
+// A statement cancelled by the server (57014) during shutdown carries no
+// context.Canceled, yet it failed only because shutdown began: it is released
+// at once too, instead of being dead-lettered as RETRIES_EXHAUSTED.
+func TestTransientFailureDuringShutdownIsReleasedWithoutCanceledInTheChain(t *testing.T) {
+	f := &fakeSQS{visibility: map[string]int32{}}
+	cancelled := &pgconn.PgError{Code: "57014", Message: "canceling statement due to user request"}
+	s := &fakeSubmitter{errFor: map[string]error{"e1": fmt.Errorf("%w: %w", app.ErrTransient, cancelled)}}
+	f.batch = []types.Message{message("h1", "w1", "111111111111", "5", bodyWith("m1", "e1"))}
+	work, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := newTestConsumer(f, s).Poll(context.Background(), work); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := f.visibility["h1"]; !ok || v != 0 {
+		t.Fatalf("visibility = %d (set %v), want 0", v, ok)
+	}
+	if len(f.dlq) != 0 {
+		t.Fatalf("dlq = %d, want the message released, not dead-lettered", len(f.dlq))
+	}
+}
+
+// A permanent failure stays permanent during shutdown.
+func TestPermanentFailureDuringShutdownIsStillDeadLettered(t *testing.T) {
+	f := &fakeSQS{visibility: map[string]int32{}}
+	s := &fakeSubmitter{errFor: map[string]error{"e1": app.ErrWalletNotFound}}
+	f.batch = []types.Message{message("h1", "w1", "111111111111", "1", bodyWith("m1", "e1"))}
+	work, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := newTestConsumer(f, s).Poll(context.Background(), work); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.dlq) != 1 {
+		t.Fatalf("dlq = %d, want 1", len(f.dlq))
+	}
+}
+
+type recordingObserver struct {
+	mu                                        sync.Mutex
+	dead                                      []string
+	retried, copyFailed, delFailed, visFailed int
+}
+
+func (o *recordingObserver) DeadLettered(code string) {
+	o.mu.Lock()
+	o.dead = append(o.dead, code)
+	o.mu.Unlock()
+}
+func (o *recordingObserver) Retried()          { o.mu.Lock(); o.retried++; o.mu.Unlock() }
+func (o *recordingObserver) DLQCopyFailed()    { o.mu.Lock(); o.copyFailed++; o.mu.Unlock() }
+func (o *recordingObserver) DeleteFailed()     { o.mu.Lock(); o.delFailed++; o.mu.Unlock() }
+func (o *recordingObserver) VisibilityFailed() { o.mu.Lock(); o.visFailed++; o.mu.Unlock() }
+
+func observedConsumer(f *fakeSQS, s *fakeSubmitter, o Observer) *Consumer {
+	c := newTestConsumer(f, s)
+	c.cfg.Observer = o
+	return c
+}
+
+func TestObserverSeesDeadLettersRetriesAndFailedCalls(t *testing.T) {
+	o := &recordingObserver{}
+	f := &fakeSQS{visibility: map[string]int32{}}
+	s := &fakeSubmitter{errFor: map[string]error{"e2": errors.New("db down")}}
+	f.batch = []types.Message{
+		message("h1", "w1", "111111111111", "1", "not json"),
+		message("h2", "w2", "111111111111", "1", bodyWith("m2", "e2")),
+	}
+	poll(t, observedConsumer(f, s, o))
+	if len(o.dead) != 1 || o.dead[0] != "INVALID_MESSAGE" || o.retried != 1 {
+		t.Fatalf("dead %v retried %d", o.dead, o.retried)
+	}
+
+	o = &recordingObserver{}
+	f = &fakeSQS{visibility: map[string]int32{}, failSend: true, failVisibility: true}
+	f.batch = []types.Message{message("h1", "w1", "111111111111", "1", "not json")}
+	poll(t, observedConsumer(f, &fakeSubmitter{}, o))
+	if len(o.dead) != 0 || o.copyFailed != 1 || o.retried != 1 || o.visFailed != 1 {
+		t.Fatalf("failed copy: dead %v copyFailed %d retried %d visibility %d", o.dead, o.copyFailed, o.retried, o.visFailed)
+	}
+
+	o = &recordingObserver{}
+	f = &fakeSQS{visibility: map[string]int32{}, failDelete: true}
+	f.batch = []types.Message{message("h1", "w1", "111111111111", "1", bodyWith("m1", "e1"))}
+	poll(t, observedConsumer(f, &fakeSubmitter{}, o))
+	if o.delFailed != 1 {
+		t.Fatalf("delete failures = %d", o.delFailed)
 	}
 }
 

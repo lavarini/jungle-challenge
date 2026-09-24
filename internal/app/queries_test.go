@@ -23,7 +23,7 @@ func (f fakeReconciler) Totals(context.Context, string) (ReconciliationTotals, e
 
 func TestReconcileReportsDifferenceAsStoredMinusCalculated(t *testing.T) {
 	stored, _ := money.Parse("100.00", "BRL")
-	r := NewReconcile(fakeReconciler{ReconciliationTotals{Stored: stored, CreditsMinusDebits: 9000, Entries: 3}}, discardLog)
+	r := NewReconcile(fakeReconciler{ReconciliationTotals{Stored: stored, CreditsMinusDebits: 9000, Entries: 3}}, discardLog, nil)
 	got, err := r.Execute(context.Background(), "w1")
 	if err != nil {
 		t.Fatal(err)
@@ -31,7 +31,7 @@ func TestReconcileReportsDifferenceAsStoredMinusCalculated(t *testing.T) {
 	if got.Consistent || got.Difference.String() != "10.00" || got.Calculated.String() != "90.00" || got.CheckedEntries != 3 {
 		t.Fatalf("reconciliation %+v", got)
 	}
-	consistent := NewReconcile(fakeReconciler{ReconciliationTotals{Stored: stored, CreditsMinusDebits: 10000, Entries: 2}}, discardLog)
+	consistent := NewReconcile(fakeReconciler{ReconciliationTotals{Stored: stored, CreditsMinusDebits: 10000, Entries: 2}}, discardLog, nil)
 	got, _ = consistent.Execute(context.Background(), "w1")
 	if !got.Consistent || !got.Difference.IsZero() {
 		t.Fatalf("consistent reconciliation %+v", got)
@@ -45,25 +45,25 @@ func TestReconcileDetectsVersionChainAndCurrencyDivergence(t *testing.T) {
 		Stored: stored, CreditsMinusDebits: 10000, Entries: 2,
 		WalletVersion: 2, MaxLedgerVersion: 2, LastBalanceAfter: lastAfter,
 	}
-	if got, err := NewReconcile(fakeReconciler{base}, discardLog).Execute(context.Background(), "w1"); err != nil || !got.Consistent {
+	if got, err := NewReconcile(fakeReconciler{base}, discardLog, nil).Execute(context.Background(), "w1"); err != nil || !got.Consistent {
 		t.Fatalf("baseline should be consistent: %+v %v", got, err)
 	}
 
 	versionMismatch := base
 	versionMismatch.MaxLedgerVersion = 1
-	if got, err := NewReconcile(fakeReconciler{versionMismatch}, discardLog).Execute(context.Background(), "w1"); err != nil || got.Consistent || !got.VersionMismatch {
+	if got, err := NewReconcile(fakeReconciler{versionMismatch}, discardLog, nil).Execute(context.Background(), "w1"); err != nil || got.Consistent || !got.VersionMismatch {
 		t.Fatalf("version mismatch not detected: %+v %v", got, err)
 	}
 
 	chainMismatch := base
 	chainMismatch.LastBalanceAfter, _ = money.Parse("90.00", "BRL")
-	if got, err := NewReconcile(fakeReconciler{chainMismatch}, discardLog).Execute(context.Background(), "w1"); err != nil || got.Consistent || !got.ChainMismatch {
+	if got, err := NewReconcile(fakeReconciler{chainMismatch}, discardLog, nil).Execute(context.Background(), "w1"); err != nil || got.Consistent || !got.ChainMismatch {
 		t.Fatalf("chain mismatch not detected: %+v %v", got, err)
 	}
 
 	currencyMismatch := base
 	currencyMismatch.CurrencyMismatches = 1
-	if got, err := NewReconcile(fakeReconciler{currencyMismatch}, discardLog).Execute(context.Background(), "w1"); err != nil || got.Consistent || got.CurrencyMismatches != 1 {
+	if got, err := NewReconcile(fakeReconciler{currencyMismatch}, discardLog, nil).Execute(context.Background(), "w1"); err != nil || got.Consistent || got.CurrencyMismatches != 1 {
 		t.Fatalf("currency mismatch not detected: %+v %v", got, err)
 	}
 }
@@ -152,5 +152,22 @@ func TestGetTransactionByIDScopesToProvider(t *testing.T) {
 	}
 	if got, err := g.ByID(context.Background(), "t1", ""); err != nil || got.ID() != "t1" {
 		t.Fatalf("internal (unscoped) read: %v %v", got, err)
+	}
+}
+
+func TestReconcileReportsDivergenceToTheHook(t *testing.T) {
+	stored, _ := money.Parse("100.00", "BRL")
+	var divergences int
+	hook := func() { divergences++ }
+	r := NewReconcile(fakeReconciler{ReconciliationTotals{Stored: stored, CreditsMinusDebits: 9000, Entries: 3}}, discardLog, hook)
+	if _, err := r.Execute(context.Background(), "w1"); err != nil {
+		t.Fatal(err)
+	}
+	ok := NewReconcile(fakeReconciler{ReconciliationTotals{Stored: stored, CreditsMinusDebits: 10000, Entries: 0}}, discardLog, hook)
+	if _, err := ok.Execute(context.Background(), "w1"); err != nil {
+		t.Fatal(err)
+	}
+	if divergences != 1 {
+		t.Fatalf("divergences = %d, want 1", divergences)
 	}
 }

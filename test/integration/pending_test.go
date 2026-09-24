@@ -25,7 +25,35 @@ import (
 var quietLog = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 func resolverFor(s stack, policy app.ReferencePolicy) *app.ResolvePending {
-	return app.NewResolvePending(postgres.NewUnitOfWork(s.pool), platform.NewSystemClock(), platform.NewUUIDv7(), policy, quietLog)
+	return app.NewResolvePending(postgres.NewUnitOfWork(s.pool), platform.NewSystemClock(), platform.NewUUIDv7(), policy, quietLog, app.ResolveHooks{})
+}
+
+// hookRecord captures what ResolvePending reports to its hooks (metrics).
+type hookRecord struct {
+	mu         sync.Mutex
+	concluded  []wagering.Status
+	invariants int
+}
+
+func (h *hookRecord) hooks() app.ResolveHooks {
+	return app.ResolveHooks{
+		Concluded: func(_ wagering.Kind, st wagering.Status) {
+			h.mu.Lock()
+			h.concluded = append(h.concluded, st)
+			h.mu.Unlock()
+		},
+		InvariantViolated: func() { h.mu.Lock(); h.invariants++; h.mu.Unlock() },
+	}
+}
+
+func (h *hookRecord) snapshot() ([]wagering.Status, int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]wagering.Status(nil), h.concluded...), h.invariants
+}
+
+func hookedResolver(s stack, policy app.ReferencePolicy, h *hookRecord) *app.ResolvePending {
+	return app.NewResolvePending(postgres.NewUnitOfWork(s.pool), platform.NewSystemClock(), platform.NewUUIDv7(), policy, quietLog, h.hooks())
 }
 
 func shortPolicy(ttl time.Duration) app.ReferencePolicy {
@@ -69,7 +97,8 @@ func resolveUntilSettled(t *testing.T, s stack, r *app.ResolvePending, id string
 
 func TestPendingRefundIsResolvedAfterTheBet(t *testing.T) {
 	s := newStack(t)
-	r := resolverFor(s, shortPolicy(time.Hour))
+	hooks := &hookRecord{}
+	r := hookedResolver(s, shortPolicy(time.Hour), hooks)
 	w := openWallet(t, s, "100.00")
 	betExternalID := uuid.NewString()
 	pending := submit(t, s, referencing(t, w, wagering.Refund, "30.00", betExternalID))
@@ -78,6 +107,9 @@ func TestPendingRefundIsResolvedAfterTheBet(t *testing.T) {
 	resolveUntilSettled(t, s, r, pending.TransactionID, 5*time.Second)
 	if st, _ := statusOf(t, s, pending.TransactionID); st != wagering.Processed {
 		t.Fatalf("status %s", st)
+	}
+	if concluded, _ := hooks.snapshot(); len(concluded) != 1 || concluded[0] != wagering.Processed {
+		t.Fatalf("concluded = %v, want [PROCESSED]", concluded)
 	}
 	if got := balanceOf(t, s, w.ID); got != "100.00" {
 		t.Fatalf("balance %s", got)
@@ -114,7 +146,8 @@ func TestPendingExpiresAsReferenceNotFound(t *testing.T) {
 	s := newStack(t)
 	stackWithShortTTL := s
 	stackWithShortTTL.submit = app.NewSubmitWager(postgres.NewUnitOfWork(s.pool), platform.NewSystemClock(), platform.NewUUIDv7(), shortPolicy(300*time.Millisecond))
-	r := resolverFor(s, shortPolicy(300*time.Millisecond))
+	hooks := &hookRecord{}
+	r := hookedResolver(s, shortPolicy(300*time.Millisecond), hooks)
 	w := openWallet(t, s, "100.00")
 	pending := submit(t, stackWithShortTTL, referencing(t, w, wagering.Refund, "30.00", uuid.NewString()))
 
@@ -122,6 +155,10 @@ func TestPendingExpiresAsReferenceNotFound(t *testing.T) {
 	st, code := statusOf(t, s, pending.TransactionID)
 	if st != wagering.Rejected || code != string(wagering.ReferenceNotFound) {
 		t.Fatalf("status %s code %s", st, code)
+	}
+	// Reschedules before the deadline are not conclusions; the expiry is.
+	if concluded, _ := hooks.snapshot(); len(concluded) != 1 || concluded[0] != wagering.Rejected {
+		t.Fatalf("concluded = %v, want [REJECTED]", concluded)
 	}
 	if n := count(t, s.pool, `SELECT count(*) FROM outbox_events WHERE aggregate_id = $1 AND event_type = 'WagerTransactionRejected'`, pending.TransactionID); n != 1 {
 		t.Fatalf("rejected events = %d", n)
@@ -219,7 +256,8 @@ func TestConcurrentClaimsAreDisjoint(t *testing.T) {
 func TestInvariantViolationBecomesFailed(t *testing.T) {
 	s := newStack(t)
 	ctx := context.Background()
-	r := resolverFor(s, shortPolicy(time.Hour))
+	hooks := &hookRecord{}
+	r := hookedResolver(s, shortPolicy(time.Hour), hooks)
 	w := openWallet(t, s, "100.00")
 	betExternalID := uuid.NewString()
 	pending := submit(t, s, referencing(t, w, wagering.Rollback, "30.00", betExternalID))
@@ -243,6 +281,9 @@ func TestInvariantViolationBecomesFailed(t *testing.T) {
 	st, code := statusOf(t, s, pending.TransactionID)
 	if st != wagering.Failed || code != string(wagering.InvariantViolation) {
 		t.Fatalf("status %s code %s", st, code)
+	}
+	if concluded, invariants := hooks.snapshot(); invariants != 1 || len(concluded) != 1 || concluded[0] != wagering.Failed {
+		t.Fatalf("hooks: concluded %v invariants %d, want [FAILED] and 1", concluded, invariants)
 	}
 	if got := balanceOf(t, s, w.ID); got != "100.00" {
 		t.Fatalf("balance %s: a failed resolution moved money", got)

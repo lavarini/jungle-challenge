@@ -11,6 +11,7 @@ import (
 	"go.uber.org/fx"
 
 	"github.com/lavarini/backend-challenge-go/internal/adapters/httpapi"
+	"github.com/lavarini/backend-challenge-go/internal/adapters/metered"
 	"github.com/lavarini/backend-challenge-go/internal/adapters/oidc"
 	"github.com/lavarini/backend-challenge-go/internal/app"
 	"github.com/lavarini/backend-challenge-go/internal/platform/config"
@@ -31,7 +32,7 @@ func newVerifier(cfg config.Config) (*oidc.Verifier, error) {
 	})
 }
 
-func newHandler(v *oidc.Verifier, open *app.OpenWallet, get *app.GetWallet, submit *app.SubmitWager, tx *app.GetTransaction, ledger *app.ListLedger, rec *app.Reconcile, r *health.Readiness, l *slog.Logger) http.Handler {
+func newHandler(v *oidc.Verifier, open *app.OpenWallet, get *app.GetWallet, submit metered.Submitter, tx *app.GetTransaction, ledger *app.ListLedger, rec *app.Reconcile, r *health.Readiness, l *slog.Logger) http.Handler {
 	return httpapi.NewHandler(httpapi.Deps{
 		Verifier: v, OpenWallet: open, GetWallet: get, SubmitWager: submit,
 		Transactions: tx, Ledger: ledger, Reconcile: rec,

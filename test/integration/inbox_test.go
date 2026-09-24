@@ -30,11 +30,11 @@ func TestRedeliveredMessageIsAnsweredFromTheInbox(t *testing.T) {
 	c := viaInbox(command(t, w, wagering.Bet, "10.00", uuid.NewString()), msg, "body-1")
 
 	first, err := s.submit.Execute(ctx, c)
-	if err != nil || first.IdempotentReplay {
+	if err != nil || first.IdempotentReplay || first.FromInbox {
 		t.Fatalf("first %+v %v", first, err)
 	}
 	again, err := s.submit.Execute(ctx, c)
-	if err != nil || !again.IdempotentReplay || again.TransactionID != first.TransactionID || again.Balance.String() != "90.00" {
+	if err != nil || !again.IdempotentReplay || !again.FromInbox || again.TransactionID != first.TransactionID || again.Balance.String() != "90.00" {
 		t.Fatalf("redelivery %+v %v", again, err)
 	}
 	if n := count(t, s.pool, `SELECT count(*) FROM inbox_messages WHERE message_id = $1 AND transaction_id = $2 AND outcome = 'PROCESSED'`, msg, first.TransactionID); n != 1 {
@@ -71,7 +71,7 @@ func TestNewMessageForAnAppliedOperationIsAReplay(t *testing.T) {
 	}
 	msg := uuid.NewString()
 	sqsRes, err := s.submit.Execute(ctx, viaInbox(c, msg, "body"))
-	if err != nil || !sqsRes.IdempotentReplay || sqsRes.TransactionID != httpRes.TransactionID {
+	if err != nil || !sqsRes.IdempotentReplay || sqsRes.FromInbox || sqsRes.TransactionID != httpRes.TransactionID {
 		t.Fatalf("sqs after http %+v %v", sqsRes, err)
 	}
 	if n := count(t, s.pool, `SELECT count(*) FROM inbox_messages WHERE message_id = $1`, msg); n != 1 {

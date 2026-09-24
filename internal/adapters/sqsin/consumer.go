@@ -41,7 +41,27 @@ type Config struct {
 	// failure before dead-lettering the message itself, well before the
 	// queue's native redrive (ADR 0013).
 	MaxReceives int32
+	// Observer receives delivery outcomes for metrics; nil disables it.
+	Observer Observer
 }
+
+// Observer receives delivery outcomes for metrics. Arguments are stable codes,
+// never message or wallet ids.
+type Observer interface {
+	DeadLettered(code string)
+	Retried()
+	DLQCopyFailed()
+	DeleteFailed()
+	VisibilityFailed()
+}
+
+type nopObserver struct{}
+
+func (nopObserver) DeadLettered(string) {}
+func (nopObserver) Retried()            {}
+func (nopObserver) DLQCopyFailed()      {}
+func (nopObserver) DeleteFailed()       {}
+func (nopObserver) VisibilityFailed()   {}
 
 type Consumer struct {
 	api    API
@@ -51,6 +71,9 @@ type Consumer struct {
 }
 
 func New(api API, s Submitter, cfg Config, log *slog.Logger) *Consumer {
+	if cfg.Observer == nil {
+		cfg.Observer = nopObserver{}
+	}
 	return &Consumer{api: api, submit: s, cfg: cfg, log: log}
 }
 
@@ -134,15 +157,19 @@ func (c *Consumer) handle(ctx context.Context, m types.Message) bool {
 		c.delete(m)
 		return true
 	}
+	code, permanent := permanentCode(err)
+	if permanent {
+		return c.deadLetter(m, env.MessageID, code, err)
+	}
 	// Shutdown cut the handling short (spec §4): the message never really
 	// failed, so it goes back at once and does not spend its retry budget.
-	if errors.Is(err, context.Canceled) && ctx.Err() != nil {
+	// Any non-permanent failure once work is cancelled counts, not only one
+	// carrying context.Canceled: a statement the server cancelled (57014)
+	// or a connection closed under it reach here without it.
+	if ctx.Err() != nil {
 		log.InfoContext(context.WithoutCancel(ctx), "message interrupted by shutdown; released", "error", err.Error())
 		c.setVisibility(m, 0)
 		return false
-	}
-	if code, permanent := permanentCode(err); permanent {
-		return c.deadLetter(m, env.MessageID, code, err)
 	}
 	// A transient failure that has already exhausted the consumer's own
 	// retry budget is dead-lettered explicitly, with the last error as the
@@ -155,6 +182,14 @@ func (c *Consumer) handle(ctx context.Context, m types.Message) bool {
 	log.WarnContext(ctx, "message will be retried", "error", err.Error(), "class", "transient")
 	c.retryLater(m)
 	return false
+}
+
+// FailureCodes lists every reason the consumer dead-letters with; metrics
+// preset their series from it.
+var FailureCodes = []string{
+	"INVALID_MESSAGE", "PROVIDER_NOT_AUTHORIZED", "WALLET_NOT_FOUND", "WALLET_MISMATCH",
+	"IDEMPOTENCY_PAYLOAD_MISMATCH", "IDEMPOTENCY_KEY_MISMATCH", "INBOX_PAYLOAD_MISMATCH",
+	"INVARIANT_VIOLATION", "RETRIES_EXHAUSTED",
 }
 
 // permanentCode classifies errors that no retry can fix (ADR 0013).
@@ -203,10 +238,12 @@ func (c *Consumer) deadLetter(m types.Message, messageID, code string, cause err
 	})
 	if err != nil {
 		c.log.Error("dead-letter copy failed; message will be retried", "messageId", messageID, "error", err.Error())
+		c.cfg.Observer.DLQCopyFailed()
 		c.retryLater(m)
 		return false
 	}
 	c.log.Warn("message dead-lettered", "messageId", messageID, "failureCode", code, "class", "permanent")
+	c.cfg.Observer.DeadLettered(code)
 	c.delete(m)
 	return true
 }
@@ -238,6 +275,7 @@ func (c *Consumer) delete(m types.Message) {
 	defer cancel()
 	if _, err := c.api.DeleteMessage(ctx, &sqs.DeleteMessageInput{QueueUrl: aws.String(c.cfg.QueueURL), ReceiptHandle: m.ReceiptHandle}); err != nil {
 		c.log.Warn("delete failed; redelivery will be answered by the inbox", "error", err.Error())
+		c.cfg.Observer.DeleteFailed()
 	}
 }
 
@@ -257,6 +295,7 @@ func (c *Consumer) retryLater(m types.Message) {
 	if delay > c.cfg.MaxVisibility {
 		delay = c.cfg.MaxVisibility
 	}
+	c.cfg.Observer.Retried()
 	c.setVisibility(m, int32(delay/time.Second))
 }
 
@@ -274,5 +313,6 @@ func (c *Consumer) setVisibility(m types.Message, seconds int32) {
 		QueueUrl: aws.String(c.cfg.QueueURL), ReceiptHandle: m.ReceiptHandle, VisibilityTimeout: seconds,
 	}); err != nil {
 		c.log.Warn("change visibility failed", "error", err.Error())
+		c.cfg.Observer.VisibilityFailed()
 	}
 }

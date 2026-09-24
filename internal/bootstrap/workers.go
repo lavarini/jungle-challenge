@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
 
+	"github.com/lavarini/backend-challenge-go/internal/adapters/metered"
 	"github.com/lavarini/backend-challenge-go/internal/adapters/outbox"
 	"github.com/lavarini/backend-challenge-go/internal/adapters/postgres"
 	"github.com/lavarini/backend-challenge-go/internal/adapters/refworker"
@@ -18,16 +19,24 @@ import (
 	"github.com/lavarini/backend-challenge-go/internal/app"
 	"github.com/lavarini/backend-challenge-go/internal/platform"
 	"github.com/lavarini/backend-challenge-go/internal/platform/config"
+	"github.com/lavarini/backend-challenge-go/internal/platform/metrics"
 	"github.com/lavarini/backend-challenge-go/internal/platform/runner"
 )
 
 var referenceWorkerModule = fx.Module("reference-worker",
-	fx.Provide(app.NewResolvePending),
+	fx.Provide(newResolvePending),
 	fx.Invoke(runReferenceWorker),
 )
 
-func runReferenceWorker(lc fx.Lifecycle, d *drain, cfg config.Config, r *app.ResolvePending, l *slog.Logger) {
-	w := refworker.New(r, refworker.Config{Interval: cfg.Workers.PollInterval, Lease: cfg.Workers.Lease, Batch: cfg.Workers.Batch}, l)
+func newResolvePending(uow app.UnitOfWork, clock app.Clock, ids app.IDGenerator, policy app.ReferencePolicy, l *slog.Logger, m *metrics.Metrics) *app.ResolvePending {
+	return app.NewResolvePending(uow, clock, ids, policy, l, app.ResolveHooks{
+		Concluded:         m.ResolverConcluded,
+		InvariantViolated: func() { m.InvariantViolation("async") },
+	})
+}
+
+func runReferenceWorker(lc fx.Lifecycle, d *drain, cfg config.Config, r *app.ResolvePending, m *metrics.Metrics, l *slog.Logger) {
+	w := refworker.New(metered.NewResolver(r, m), refworker.Config{Interval: cfg.Workers.PollInterval, Lease: cfg.Workers.Lease, Batch: cfg.Workers.Batch}, l)
 	runLoop(lc, d, "reference-worker", w.Loop)
 }
 
@@ -35,10 +44,11 @@ var consumerModule = fx.Module("consumer",
 	fx.Invoke(runConsumer),
 )
 
-func runConsumer(lc fx.Lifecycle, d *drain, cfg config.Config, client *sqs.Client, submit *app.SubmitWager, l *slog.Logger) {
+func runConsumer(lc fx.Lifecycle, d *drain, cfg config.Config, client *sqs.Client, submit metered.Submitter, m *metrics.Metrics, l *slog.Logger) {
 	c := sqsin.New(client, submit, sqsin.Config{
 		QueueURL: cfg.AWS.WagerQueueURL, DLQURL: cfg.AWS.DLQURL, Senders: cfg.AWS.Senders,
 		MaxMessages: 10, WaitSeconds: 20, MaxVisibility: 60 * time.Second, MaxReceives: cfg.AWS.MaxReceives,
+		Observer: metrics.ConsumerObserver{M: m},
 	}, l)
 	runLoop(lc, d, "consumer", c.Loop)
 }
@@ -47,7 +57,7 @@ var outboxRelayModule = fx.Module("outbox-relay",
 	fx.Invoke(runOutboxRelay),
 )
 
-func runOutboxRelay(lc fx.Lifecycle, d *drain, cfg config.Config, pool *pgxpool.Pool, clock app.Clock, l *slog.Logger) error {
+func runOutboxRelay(lc fx.Lifecycle, d *drain, cfg config.Config, pool *pgxpool.Pool, clock app.Clock, m *metrics.Metrics, l *slog.Logger) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	client, err := platform.NewSNSClient(ctx, cfg.AWS.Region)
@@ -62,6 +72,7 @@ func runOutboxRelay(lc fx.Lifecycle, d *drain, cfg config.Config, pool *pgxpool.
 	r := outbox.New(postgres.NewOutboxStore(pool), snsout.New(client, cfg.AWS.EventsTopicARN), outbox.Config{
 		Interval: cfg.Workers.PollInterval, Lease: cfg.Workers.Lease, Batch: cfg.Workers.Batch,
 		MaxPermanentAttempts: 5, InitialBackoff: time.Second, MaxBackoff: 5 * time.Minute,
+		Observer: metrics.RelayObserver{M: m},
 	}, clock.Now, uuid.NewString, l)
 	runLoop(lc, d, "outbox-relay", r.Loop)
 	return nil

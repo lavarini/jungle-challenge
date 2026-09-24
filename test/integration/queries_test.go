@@ -79,7 +79,7 @@ func TestLedgerPaginatesInSeqOrder(t *testing.T) {
 
 func TestReconciliationMatchesTheLedger(t *testing.T) {
 	s := newStack(t)
-	r := app.NewReconcile(postgres.NewReconciler(s.pool), quietLog)
+	r := app.NewReconcile(postgres.NewReconciler(s.pool), quietLog, nil)
 	w := openWallet(t, s, "1000.00")
 	submit(t, s, command(t, w, wagering.Bet, "25.00", uuid.NewString()))
 	got, err := r.Execute(context.Background(), w.ID)
@@ -99,7 +99,7 @@ func TestReconciliationMatchesTheLedger(t *testing.T) {
 // must run only on the test goroutine.
 func TestReconciliationIsConsistentUnderConcurrentBets(t *testing.T) {
 	s := newStack(t)
-	r := app.NewReconcile(postgres.NewReconciler(s.pool), quietLog)
+	r := app.NewReconcile(postgres.NewReconciler(s.pool), quietLog, nil)
 	w := openWallet(t, s, "1000.00")
 
 	const n = 10
@@ -158,5 +158,33 @@ func TestReconciliationIsConsistentUnderConcurrentBets(t *testing.T) {
 
 	for err := range errs {
 		t.Error(err)
+	}
+}
+
+// The backlog gauges read the pending and outbox backlogs of this database.
+func TestStatsSnapshotReadsTheBacklog(t *testing.T) {
+	s := newStack(t)
+	w := openWallet(t, s, "100.00")
+	submit(t, s, referencing(t, w, wagering.Refund, "10.00", uuid.NewString()))
+	stats := postgres.NewStats(s.pool)
+	now := time.Now()
+
+	far, err := stats.Snapshot(context.Background(), now, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if far.PendingReferences != 1 || far.PendingNearDeadline != 0 {
+		t.Fatalf("pending %d near %d, want 1 and 0", far.PendingReferences, far.PendingNearDeadline)
+	}
+	// The opening and the pending-reference events wait for a relay.
+	if far.OutboxPending < 2 || far.OutboxOldestMillis < 0 {
+		t.Fatalf("outbox pending %d oldest %dms", far.OutboxPending, far.OutboxOldestMillis)
+	}
+	near, err := stats.Snapshot(context.Background(), now, 1000*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if near.PendingNearDeadline != 1 {
+		t.Fatalf("near deadline = %d, want 1", near.PendingNearDeadline)
 	}
 }

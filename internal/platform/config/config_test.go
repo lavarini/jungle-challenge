@@ -67,6 +67,25 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 	}
 }
 
+func TestAdminAndReadinessDelay(t *testing.T) {
+	c, err := Load(env(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.AdminAddr != ":9090" || c.ShutdownReadinessDelay != 0 {
+		t.Fatalf("admin %q delay %s", c.AdminAddr, c.ShutdownReadinessDelay)
+	}
+	c, err = Load(env(map[string]string{"ADMIN_ADDR": "127.0.0.1:9191", "SHUTDOWN_READINESS_DELAY": "5s"}))
+	if err != nil || c.AdminAddr != "127.0.0.1:9191" || c.ShutdownReadinessDelay != 5*time.Second {
+		t.Fatalf("admin %q delay %s err %v", c.AdminAddr, c.ShutdownReadinessDelay, err)
+	}
+	for _, v := range []string{"-1s", "soon", "25s"} {
+		if _, err := Load(env(map[string]string{"SHUTDOWN_READINESS_DELAY": v})); err == nil {
+			t.Errorf("SHUTDOWN_READINESS_DELAY=%s accepted (must be >= 0 and below SHUTDOWN_TIMEOUT)", v)
+		}
+	}
+}
+
 func TestRoleRuns(t *testing.T) {
 	if !RoleAll.Runs(RoleAPI) || !RoleAPI.Runs(RoleAPI) || RoleAPI.Runs(RoleConsumer) {
 		t.Fatal("Runs mismatch")

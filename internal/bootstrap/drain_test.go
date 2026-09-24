@@ -110,7 +110,7 @@ func TestPoolClosesAfterTheDrain(t *testing.T) {
 	lc := fxtest.NewLifecycle(t)
 	lc.Append(fx.StopHook(func() { record("pool") }))
 	ready := &fakeReadiness{}
-	d := registerDrain(lc, ready, quietLogger())
+	d := registerDrain(lc, ready, 0, quietLogger())
 	d.add("http", func(context.Context) error {
 		time.Sleep(20 * time.Millisecond)
 		record("http")
@@ -122,5 +122,57 @@ func TestPoolClosesAfterTheDrain(t *testing.T) {
 	}
 	if len(order) != 2 || order[0] != "http" || order[1] != "pool" {
 		t.Fatalf("stop order = %v, want [http pool]", order)
+	}
+}
+
+// The readiness delay lets a load balancer see 503 before anything drains:
+// no component stops until it has passed.
+func TestDrainWaitsTheReadinessDelayBeforeStopping(t *testing.T) {
+	ready := &fakeReadiness{}
+	d := &drain{ready: ready, delay: 150 * time.Millisecond, log: quietLogger()}
+	var began time.Time
+	d.add("http", func(context.Context) error { began = time.Now(); return nil })
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := d.stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !ready.draining.Load() || began.Sub(start) < 150*time.Millisecond {
+		t.Fatalf("http stopped %s after the drain began, want >= the 150ms delay", began.Sub(start))
+	}
+}
+
+// A delay longer than the stop budget cannot eat the whole budget.
+func TestReadinessDelayIsBoundedByTheBudget(t *testing.T) {
+	d := &drain{ready: &fakeReadiness{}, delay: time.Minute, log: quietLogger()}
+	stopped := false
+	d.add("http", func(context.Context) error { stopped = true; return nil })
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_ = d.stop(ctx)
+	if time.Since(start) > time.Second || !stopped {
+		t.Fatalf("stop took %s, stopped %v", time.Since(start), stopped)
+	}
+}
+
+// The admin server (metrics, pprof, worker readiness) stays up while the
+// others drain and stops only after all of them returned.
+func TestLastStopsRunAfterTheOthers(t *testing.T) {
+	d := &drain{ready: &fakeReadiness{}, log: quietLogger()}
+	var mu sync.Mutex
+	var order []string
+	record := func(s string) { mu.Lock(); order = append(order, s); mu.Unlock() }
+	d.addLast("admin", func(context.Context) error { record("admin"); return nil })
+	d.add("consumer", func(context.Context) error { time.Sleep(30 * time.Millisecond); record("consumer"); return nil })
+	d.add("http", func(context.Context) error { record("http"); return nil })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := d.stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(order) != 3 || order[2] != "admin" {
+		t.Fatalf("order = %v, want admin last", order)
 	}
 }

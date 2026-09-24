@@ -33,7 +33,6 @@ var coreModule = fx.Module("core",
 		app.NewSubmitWager,
 		app.NewGetTransaction,
 		app.NewListLedger,
-		app.NewReconcile,
 		fx.Annotate(postgres.NewReconciler, fx.As(new(app.Reconciler))),
 	),
 )

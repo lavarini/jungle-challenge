@@ -76,6 +76,10 @@ services:
     environment: &app-env
       WAGERD_ROLE: all
       HTTP_ADDR: ":8080"
+      # Metrics, pprof and worker readiness; deliberately not in `ports`.
+      ADMIN_ADDR: ":9090"
+      # Keep serving 503 for 5 s before draining so a balancer stops routing.
+      SHUTDOWN_READINESS_DELAY: 5s
       DATABASE_URL: postgres://wager_app:app-dev-only@postgres:5432/wagering?sslmode=disable
       OIDC_ISSUER_URL: http://localhost:8081/realms/wagering
       OIDC_DISCOVERY_URL: http://keycloak:8080/realms/wagering

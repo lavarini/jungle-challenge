@@ -44,6 +44,9 @@ type SubmitResult struct {
 	Balance          money.Money
 	WalletVersion    int64
 	IdempotentReplay bool
+	// FromInbox marks a replay answered by the SQS inbox (a redelivered
+	// message), as opposed to one answered by the financial idempotency.
+	FromInbox bool
 }
 
 func (c SubmitCommand) validate() error {
