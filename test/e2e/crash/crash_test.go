@@ -132,22 +132,49 @@ func TestConsumerCrashAfterCommitIsRedeliveredWithoutDoubleDebit(t *testing.T) {
 
 // Enunciado 13.6: relay dies after publishing and before confirming; another
 // relay republishes the same eventId and SNS FIFO deduplicates it.
+//
+// The crash package shares one database across its tests, which run in
+// source order, so a relay crashed with the default batch (50) can claim and
+// publish the earliest head of *any* partition left unpublished by an
+// earlier test, not this test's own event: the "attempts >= 2" assertion
+// would then hold for the right wallet for the wrong reason (every head a
+// batch claims gets attempts+1, whether or not it gets published before the
+// crash). Two things pin this test to its own window: draining the
+// package-wide backlog first, so the only unpublished row left when the
+// crash relay starts is this test's own event, and asserting on that event's
+// own event_id rather than on "some row of this wallet".
 func TestRelayCrashAfterPublishIsRepublishedWithTheSameEventID(t *testing.T) {
 	pool := dbPool(t)
 	api := spawn(t, "api", "api")
 	api.waitReady(t)
-	crashing := spawn(t, "relay-crash", "outbox-relay", "FAILPOINT=outbox.after_publish=exit")
-	w := openWallet(t, api, "100.00")
 
+	drain := spawn(t, "relay-drain", "outbox-relay")
+	eventually(t, 60*time.Second, func() bool {
+		return count(t, pool, `SELECT count(*) FROM outbox_events WHERE published_at IS NULL AND dead_at IS NULL`) == 0
+	})
+	_ = drain.cmd.Process.Kill()
+	drain.waitExit(t, 10*time.Second)
+
+	w := openWallet(t, api, "100.00")
+	var eventID string
+	if err := pool.QueryRow(context.Background(),
+		`SELECT event_id FROM outbox_events WHERE partition_key = $1 ORDER BY seq ASC LIMIT 1`, w.ID).Scan(&eventID); err != nil {
+		t.Fatal(err)
+	}
+
+	// WORKER_BATCH=1: with the backlog drained, this wallet's own opening
+	// event is the only unpublished row in the whole table, so the crash
+	// relay's single-item claim can only be it.
+	crashing := spawn(t, "relay-crash", "outbox-relay", "FAILPOINT=outbox.after_publish=exit", "WORKER_BATCH=1")
 	if code := crashing.waitExit(t, 60*time.Second); code != 137 {
 		t.Fatalf("relay exit code %d", code)
 	}
 	spawn(t, "relay", "outbox-relay")
 	eventually(t, 60*time.Second, func() bool {
-		return count(t, pool, `SELECT count(*) FROM outbox_events WHERE partition_key = $1 AND published_at IS NULL`, w.ID) == 0
+		return count(t, pool, `SELECT count(*) FROM outbox_events WHERE event_id = $1 AND published_at IS NOT NULL`, eventID) == 1
 	})
-	if n := count(t, pool, `SELECT count(*) FROM outbox_events WHERE partition_key = $1 AND attempts >= 2`, w.ID); n < 1 {
-		t.Fatal("the event published before the crash must have been claimed again")
+	if n := count(t, pool, `SELECT count(*) FROM outbox_events WHERE event_id = $1 AND attempts >= 2`, eventID); n != 1 {
+		t.Fatalf("event %s must have attempts >= 2 (republished after the crash), got %d rows matching", eventID, n)
 	}
 }
 
