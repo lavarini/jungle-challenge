@@ -12,7 +12,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
-	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -162,21 +161,52 @@ func TestFiftyMixedHTTPAndSQSDuplicates(t *testing.T) {
 		t.Fatalf("final balance %s, want 90.00 (one debit)", final.Balance.Amount)
 	}
 
-	dlqURL, err := env.LocalStack.QueueURL(context.Background(), "wager-transactions-dlq.fifo")
+	requireNoDLQMessagesForWallet(t, w.ID)
+}
+
+// requireNoDLQMessagesForWallet fails if the dead-letter queue holds a
+// message for walletID. The DLQ is shared with the rest of the e2e package,
+// so a message belonging to another test (or a future one) is not this
+// test's business: it is released with visibility 0 instead of being
+// consumed, exactly like the shared audit queue in async_test.go.
+func requireNoDLQMessagesForWallet(t *testing.T, walletID string) {
+	t.Helper()
+	ctx := context.Background()
+	dlqURL, err := env.LocalStack.QueueURL(ctx, "wager-transactions-dlq.fifo")
 	if err != nil {
 		t.Fatal(err)
 	}
-	dlqClient, err := env.LocalStack.SQS(context.Background(), "test")
+	client, err := env.LocalStack.SQS(ctx, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := dlqClient.GetQueueAttributes(context.Background(), &sqs.GetQueueAttributesInput{
-		QueueUrl: aws.String(dlqURL), AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameApproximateNumberOfMessages},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out.Attributes["ApproximateNumberOfMessages"] != "0" {
-		t.Fatalf("DLQ has %s messages, want 0", out.Attributes["ApproximateNumberOfMessages"])
+	for attempt := 0; attempt < 10; attempt++ {
+		out, err := client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
+			QueueUrl: aws.String(dlqURL), MaxNumberOfMessages: 10, WaitTimeSeconds: 1,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(out.Messages) == 0 {
+			return
+		}
+		for _, m := range out.Messages {
+			var envelope struct {
+				MessageID string `json:"messageId"`
+				Data      struct {
+					WalletID string `json:"walletId"`
+				} `json:"data"`
+			}
+			_ = json.Unmarshal([]byte(aws.ToString(m.Body)), &envelope)
+			if envelope.Data.WalletID == walletID {
+				t.Errorf("DLQ received a message for this test's wallet (messageId %s): %s", envelope.MessageID, aws.ToString(m.Body))
+				continue
+			}
+			if _, err := client.ChangeMessageVisibility(ctx, &sqs.ChangeMessageVisibilityInput{
+				QueueUrl: aws.String(dlqURL), ReceiptHandle: m.ReceiptHandle, VisibilityTimeout: 0,
+			}); err != nil {
+				t.Errorf("release foreign DLQ message: %v", err)
+			}
+		}
 	}
 }

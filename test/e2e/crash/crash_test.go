@@ -114,7 +114,11 @@ func TestConsumerCrashAfterCommitIsRedeliveredWithoutDoubleDebit(t *testing.T) {
 	}
 
 	spawn(t, "consumer", "consumer")
-	// Visibility timeout is 30 s: the message comes back once and is answered by the inbox.
+	// Visibility timeout is 30 s: the message comes back once and is answered by
+	// the inbox. Queue-wide attributes are this test's own signal: the crash
+	// package provisions wager-transactions.fifo once for the whole package and
+	// runs its tests sequentially, so no other test or process touches this
+	// queue while this one is running.
 	eventually(t, 60*time.Second, func() bool {
 		out, err := client.GetQueueAttributes(context.Background(), &sqs.GetQueueAttributesInput{
 			QueueUrl: aws.String(queues.in), AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameApproximateNumberOfMessages, types.QueueAttributeNameApproximateNumberOfMessagesNotVisible},
@@ -213,37 +217,98 @@ func TestRestartPreservesIdempotencyAndPendingOperations(t *testing.T) {
 	eventually(t, 30*time.Second, func() bool { return balance(t, pool, w.ID) == 9000 })
 }
 
-// SIGTERM stops intake, drains in-flight requests and exits cleanly.
+// requestOutcome carries one in-flight request's result to the test goroutine;
+// only that goroutine calls t.Fatal, so this type touches no testing.T.
+type requestOutcome struct {
+	status int
+	err    error
+}
+
+// SIGTERM reports 503 on /health/ready before the listener closes (the
+// SHUTDOWN_READINESS_DELAY window), lets every request already in flight
+// finish with 201, drains and exits cleanly with exactly one debit per
+// accepted request.
 func TestSIGTERMDrainsAndExitsCleanly(t *testing.T) {
 	pool := dbPool(t)
-	api := spawn(t, "api", "all")
+	api := spawn(t, "api", "all", "SHUTDOWN_READINESS_DELAY=2s")
 	api.waitReady(t)
 	provider := token(t, testenv.ProviderAID, testenv.ProviderASecret)
-	wallets := make([]wallet, 20)
+
+	const n = 20
+	wallets := make([]wallet, n)
 	for i := range wallets {
 		wallets[i] = openWallet(t, api, "100.00")
 	}
-	var wg sync.WaitGroup
-	for _, w := range wallets {
-		wg.Add(1)
-		go func(w wallet) {
+
+	outcomes := make([]requestOutcome, n)
+	var sent, wg sync.WaitGroup
+	sent.Add(n)
+	wg.Add(n)
+	for i, w := range wallets {
+		go func(i int, w wallet) {
 			defer wg.Done()
 			id := uuid.NewString()
 			b, _ := json.Marshal(operation(w, "BET", "1.00", id, ""))
 			req, _ := http.NewRequest(http.MethodPost, "http://"+api.addr+"/wagering/transactions", bytes.NewReader(b))
 			req.Header.Set("Authorization", "Bearer "+provider)
 			req.Header.Set("Idempotency-Key", "provider-a:"+id)
-			if resp, err := http.DefaultClient.Do(req); err == nil {
-				resp.Body.Close()
+			sent.Done() // signals the request is about to be dispatched, before SIGTERM is sent below
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				outcomes[i] = requestOutcome{err: err}
+				return
 			}
-		}(w)
+			defer resp.Body.Close()
+			outcomes[i] = requestOutcome{status: resp.StatusCode}
+		}(i, w)
 	}
-	time.Sleep(50 * time.Millisecond)
+	sent.Wait()
+	time.Sleep(50 * time.Millisecond) // let the dispatched requests actually reach the server
 	_ = api.cmd.Process.Signal(syscall.SIGTERM)
+
+	// The readiness delay must report 503 before the listener closes: poll
+	// well inside the 2 s window and fail if the connection is refused first.
+	sawUnavailable := false
+	for deadline := time.Now().Add(1500 * time.Millisecond); time.Now().Before(deadline); {
+		resp, err := http.Get("http://" + api.addr + "/health/ready")
+		if err != nil {
+			t.Fatalf("/health/ready: connection failed before a 503 was observed: %v", err)
+		}
+		status := resp.StatusCode
+		resp.Body.Close()
+		if status == http.StatusServiceUnavailable {
+			sawUnavailable = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !sawUnavailable {
+		t.Fatal("/health/ready never answered 503 during the readiness delay")
+	}
+
 	wg.Wait()
 	if code := api.waitExit(t, 20*time.Second); code != 0 {
 		t.Fatalf("exit code %d after SIGTERM", code)
 	}
+
+	// Every request above began before SIGTERM was sent (guarded by sent.Wait
+	// plus the buffer): all of them must have completed with 201, none refused.
+	created := 0
+	walletIDs := make([]string, 0, n)
+	for i, o := range outcomes {
+		if o.err != nil {
+			t.Fatalf("request %d: connection error: %v", i, o.err)
+		}
+		if o.status != http.StatusCreated {
+			t.Fatalf("request %d: status %d, want 201 (sent before SIGTERM)", i, o.status)
+		}
+		created++
+		walletIDs = append(walletIDs, wallets[i].ID)
+	}
+	if debits := count(t, pool, `SELECT count(*) FROM wallet_ledger_entries WHERE wallet_id = ANY($1::uuid[]) AND direction = 'DEBIT'`, walletIDs); debits != created {
+		t.Fatalf("debit rows = %d, want %d (one per accepted request)", debits, created)
+	}
+
 	for _, w := range wallets {
 		var stored, ledger int64
 		if err := pool.QueryRow(context.Background(), `SELECT w.balance_minor,
