@@ -1,0 +1,182 @@
+//go:build e2e
+
+package e2e
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+func outboxCount(t *testing.T, pool *pgxpool.Pool, walletID string) int {
+	t.Helper()
+	return countRows(t, pool, `SELECT count(*) FROM outbox_events WHERE partition_key = $1`, walletID)
+}
+
+// oneSubmissionOutboxEvents submits one fresh bet and returns how many outbox
+// rows it produces, so the 50-duplicate scenario below can assert against the
+// real number instead of assuming 1 (a processed bet with a balance change
+// appends both an outcome event and a balance-changed event).
+func oneSubmissionOutboxEvents(t *testing.T) int {
+	t.Helper()
+	provider, internal := tokens(t)
+	pool := dbPool(t)
+	w := openWallet(t, procs[0], internal, "100.00")
+	before := outboxCount(t, pool, w.ID)
+	b := bet(w, uuid.NewString(), "10.00")
+	key := "provider-a:" + b["externalTransactionId"].(string)
+	if s := call(t, procs[0], http.MethodPost, "/wagering/transactions", provider, key, b, nil); s != http.StatusCreated {
+		t.Fatalf("baseline submit: %d", s)
+	}
+	return outboxCount(t, pool, w.ID) - before
+}
+
+// sendSQSDuplicate does not touch testing.T, so goroutines can use it without
+// calling FailNow off the test's own goroutine.
+func sendSQSDuplicate(accessKey, walletID string, data map[string]any) error {
+	ctx := context.Background()
+	url, err := env.LocalStack.QueueURL(ctx, "wager-transactions.fifo")
+	if err != nil {
+		return err
+	}
+	client, err := env.LocalStack.SQS(ctx, accessKey)
+	if err != nil {
+		return err
+	}
+	raw, _ := json.Marshal(map[string]any{"messageId": uuid.NewString(), "type": "WagerTransactionRequested",
+		"occurredAt": time.Now().UTC().Format(time.RFC3339Nano), "data": data})
+	_, err = client.SendMessage(ctx, &sqs.SendMessageInput{
+		QueueUrl: aws.String(url), MessageBody: aws.String(string(raw)),
+		MessageGroupId: aws.String(walletID), MessageDeduplicationId: aws.String(uuid.NewString()),
+	})
+	return err
+}
+
+// The spec's section 8 scenario: 50 sends of the same operation (same
+// idempotency key and body), half over HTTP and half over SQS, fired in
+// parallel across the three processes. One debit, one transaction row, one
+// ledger row, the baseline's worth of outbox events, a reconciled wallet, and
+// nothing reaches the DLQ.
+func TestFiftyMixedHTTPAndSQSDuplicates(t *testing.T) {
+	baseline := oneSubmissionOutboxEvents(t)
+	provider, internal := tokens(t)
+	pool := dbPool(t)
+	w := openWallet(t, procs[0], internal, "100.00")
+	before := outboxCount(t, pool, w.ID)
+
+	b := bet(w, uuid.NewString(), "10.00")
+	extID := b["externalTransactionId"].(string)
+	key := "provider-a:" + extID
+	data := map[string]any{}
+	for k, v := range b {
+		data[k] = v
+	}
+	data["idempotencyKey"] = key
+
+	const n = 50
+	statuses := make([]int, n)
+	results := make([]submitJSON, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		if i%2 == 0 {
+			go func(i int) {
+				defer wg.Done()
+				statuses[i], errs[i] = send(procs[i%3], http.MethodPost, "/wagering/transactions", provider, key, b, &results[i])
+			}(i)
+		} else {
+			go func(i int) {
+				defer wg.Done()
+				errs[i] = sendSQSDuplicate("111111111111", w.ID, data)
+			}(i)
+		}
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+	}
+
+	created, replayed := 0, 0
+	var transactionID string
+	for i := 0; i < n; i += 2 {
+		switch statuses[i] {
+		case http.StatusCreated:
+			created++
+		case http.StatusOK:
+			replayed++
+			if !results[i].IdempotentReplay {
+				t.Fatalf("http send %d: status 200 but not marked as a replay: %+v", i, results[i])
+			}
+		default:
+			t.Fatalf("http send %d: unexpected status %d", i, statuses[i])
+		}
+		if results[i].TransactionID == "" {
+			t.Fatalf("http send %d: empty transactionId", i)
+		}
+		if transactionID == "" {
+			transactionID = results[i].TransactionID
+		} else if results[i].TransactionID != transactionID {
+			t.Fatalf("http send %d: transactionId %s, want %s", i, results[i].TransactionID, transactionID)
+		}
+	}
+	// The winning commit can come from either transport: an SQS delivery may
+	// beat every HTTP request to it, in which case all 25 HTTP responses are
+	// replays. What must hold is that at most one HTTP response is 201 and
+	// every response, 201 or replay, agrees on the transactionId (checked above).
+	if created > 1 {
+		t.Fatalf("created = %d, want at most 1", created)
+	}
+	if created+replayed != 25 {
+		t.Fatalf("created+replayed = %d, want 25", created+replayed)
+	}
+
+	eventually(t, 30*time.Second, func() bool {
+		return countRows(t, pool, `SELECT count(*) FROM wallet_ledger_entries WHERE wallet_id = $1 AND direction = 'DEBIT'`, w.ID) == 1
+	})
+	if n := countRows(t, pool, `SELECT count(*) FROM wager_transactions WHERE wallet_id = $1 AND kind = 'BET'`, w.ID); n != 1 {
+		t.Fatalf("BET transaction rows = %d, want 1", n)
+	}
+	if n := countRows(t, pool, `SELECT count(*) FROM wager_transactions WHERE id = $1`, transactionID); n != 1 {
+		t.Fatalf("transaction rows for %s = %d, want 1", transactionID, n)
+	}
+	if got := outboxCount(t, pool, w.ID) - before; got != baseline {
+		t.Fatalf("outbox events = %d, want %d (one submission's worth)", got, baseline)
+	}
+	requireReconciled(t, pool, w.ID)
+
+	var final walletJSON
+	call(t, procs[2], http.MethodGet, "/wallets/"+w.ID, internal, "", nil, &final)
+	if final.Balance.Amount != "90.00" {
+		t.Fatalf("final balance %s, want 90.00 (one debit)", final.Balance.Amount)
+	}
+
+	dlqURL, err := env.LocalStack.QueueURL(context.Background(), "wager-transactions-dlq.fifo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dlqClient, err := env.LocalStack.SQS(context.Background(), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := dlqClient.GetQueueAttributes(context.Background(), &sqs.GetQueueAttributesInput{
+		QueueUrl: aws.String(dlqURL), AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameApproximateNumberOfMessages},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Attributes["ApproximateNumberOfMessages"] != "0" {
+		t.Fatalf("DLQ has %s messages, want 0", out.Attributes["ApproximateNumberOfMessages"])
+	}
+}

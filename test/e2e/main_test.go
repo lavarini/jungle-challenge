@@ -106,6 +106,10 @@ func start(binary, dir, name, queueURL, dlqURL, topicARN string) (*process, erro
 	if err != nil {
 		return nil, err
 	}
+	adminAddr, err := freeAddr()
+	if err != nil {
+		return nil, err
+	}
 	logPath := filepath.Join(dir, name+".log")
 	logFile, err := os.Create(logPath)
 	if err != nil {
@@ -116,6 +120,7 @@ func start(binary, dir, name, queueURL, dlqURL, topicARN string) (*process, erro
 	cmd.Env = append(os.Environ(),
 		"WAGERD_ROLE=all",
 		"HTTP_ADDR="+addr,
+		"ADMIN_ADDR="+adminAddr,
 		"DATABASE_URL="+env.Postgres.AppDSN,
 		"OIDC_ISSUER_URL="+env.Keycloak.IssuerURL,
 		"OIDC_CLOCK_SKEW=1s",
