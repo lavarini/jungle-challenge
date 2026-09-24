@@ -5,6 +5,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 )
@@ -17,6 +18,16 @@ func NewSQSClient(ctx context.Context, region string) (*sqs.Client, error) {
 		return nil, err
 	}
 	return sqs.NewFromConfig(cfg), nil
+}
+
+// NewSNSClient uses the SDK's standard environment: credentials and
+// AWS_ENDPOINT_URL (LocalStack locally, unset in AWS).
+func NewSNSClient(ctx context.Context, region string) (*sns.Client, error) {
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(region))
+	if err != nil {
+		return nil, err
+	}
+	return sns.NewFromConfig(cfg), nil
 }
 
 // SQSProbe checks that the queue exists and is reachable.

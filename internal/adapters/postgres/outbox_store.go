@@ -1,0 +1,84 @@
+package postgres
+
+import (
+	"context"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/lavarini/backend-challenge-go/internal/adapters/outbox"
+)
+
+const maxErrorLength = 1000
+
+// OutboxStore runs each relay step in its own short statement; no transaction
+// stays open while the broker is called (ADR 0014).
+type OutboxStore struct {
+	pool *pgxpool.Pool
+}
+
+func NewOutboxStore(pool *pgxpool.Pool) *OutboxStore { return &OutboxStore{pool: pool} }
+
+// ClaimHeads leases the oldest unpublished event of each partition, when it
+// is due and not leased by someone else.
+func (s *OutboxStore) ClaimHeads(ctx context.Context, now time.Time, limit int, claimID string, leaseUntil time.Time) ([]outbox.Message, error) {
+	rows, err := s.pool.Query(ctx, `WITH heads AS (
+			SELECT DISTINCT ON (partition_key) seq
+			FROM outbox_events
+			WHERE published_at IS NULL AND dead_at IS NULL
+			ORDER BY partition_key, seq
+		), due AS (
+			SELECT o.seq
+			FROM outbox_events o JOIN heads h ON h.seq = o.seq
+			WHERE o.next_attempt_at <= $1 AND (o.claim_expires_at IS NULL OR o.claim_expires_at < $1)
+			ORDER BY o.seq
+			LIMIT $2
+			FOR UPDATE OF o SKIP LOCKED
+		)
+		UPDATE outbox_events o SET claim_id = $3, claim_expires_at = $4, attempts = o.attempts + 1
+		FROM due WHERE o.seq = due.seq
+		RETURNING o.seq, o.event_id::text, o.partition_key, o.event_type, o.payload::text, o.attempts`,
+		now, limit, claimID, leaseUntil)
+	if err != nil {
+		return nil, classify(err)
+	}
+	msgs, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (outbox.Message, error) {
+		var m outbox.Message
+		var payload string
+		err := row.Scan(&m.Seq, &m.EventID, &m.PartitionKey, &m.EventType, &payload, &m.Attempts)
+		m.Payload = []byte(payload)
+		return m, err
+	})
+	return msgs, classify(err)
+}
+
+func (s *OutboxStore) Ack(ctx context.Context, seq int64, claimID string, now time.Time) (bool, error) {
+	return s.fenced(ctx, `UPDATE outbox_events SET published_at = $3, claim_id = NULL, claim_expires_at = NULL, last_error = NULL
+		WHERE seq = $1 AND claim_id = $2`, seq, claimID, now)
+}
+
+func (s *OutboxStore) Retry(ctx context.Context, seq int64, claimID string, next time.Time, lastErr string) (bool, error) {
+	return s.fenced(ctx, `UPDATE outbox_events SET next_attempt_at = $3, claim_id = NULL, claim_expires_at = NULL, last_error = $4
+		WHERE seq = $1 AND claim_id = $2`, seq, claimID, next, truncate(lastErr))
+}
+
+func (s *OutboxStore) Dead(ctx context.Context, seq int64, claimID string, now time.Time, lastErr string) (bool, error) {
+	return s.fenced(ctx, `UPDATE outbox_events SET dead_at = $3, claim_id = NULL, claim_expires_at = NULL, last_error = $4
+		WHERE seq = $1 AND claim_id = $2`, seq, claimID, now, truncate(lastErr))
+}
+
+func (s *OutboxStore) fenced(ctx context.Context, sql string, args ...any) (bool, error) {
+	tag, err := s.pool.Exec(ctx, sql, args...)
+	if err != nil {
+		return false, classify(err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func truncate(s string) string {
+	if len(s) > maxErrorLength {
+		return s[:maxErrorLength]
+	}
+	return s
+}

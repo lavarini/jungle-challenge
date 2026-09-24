@@ -26,5 +26,8 @@ func Options(cfg config.Config) fx.Option {
 	if cfg.Role.Runs(config.RoleConsumer) {
 		opts = append(opts, consumerModule)
 	}
+	if cfg.Role.Runs(config.RoleOutboxRelay) {
+		opts = append(opts, outboxRelayModule)
+	}
 	return fx.Options(opts...)
 }
