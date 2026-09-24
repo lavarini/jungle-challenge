@@ -31,8 +31,12 @@ func newVerifier(cfg config.Config) (*oidc.Verifier, error) {
 	})
 }
 
-func newHandler(v *oidc.Verifier, open *app.OpenWallet, get *app.GetWallet, submit *app.SubmitWager, r *health.Readiness, l *slog.Logger) http.Handler {
-	return httpapi.NewHandler(httpapi.Deps{Verifier: v, OpenWallet: open, GetWallet: get, SubmitWager: submit, Readiness: r, Logger: l})
+func newHandler(v *oidc.Verifier, open *app.OpenWallet, get *app.GetWallet, submit *app.SubmitWager, tx *app.GetTransaction, ledger *app.ListLedger, rec *app.Reconcile, r *health.Readiness, l *slog.Logger) http.Handler {
+	return httpapi.NewHandler(httpapi.Deps{
+		Verifier: v, OpenWallet: open, GetWallet: get, SubmitWager: submit,
+		Transactions: tx, Ledger: ledger, Reconcile: rec,
+		Readiness: r, Logger: l,
+	})
 }
 
 // runHTTPServer binds synchronously so a busy port fails startup. On stop it

@@ -13,11 +13,12 @@ var (
 	ErrIdempotencyPayloadMismatch = errors.New("idempotency key reused with a different payload")
 	ErrIdempotencyKeyMismatch     = errors.New("operation already registered under another idempotency key")
 	// ErrUniqueConflict is a concurrent insert of the same identity; retried once.
-	ErrUniqueConflict     = errors.New("concurrent unique conflict")
-	ErrTransient          = errors.New("transient infrastructure failure")
-	ErrInvariantViolation = errors.New("database invariant violation")
-	ErrNotImplemented     = errors.New("not implemented")
-	ErrUnauthenticated    = errors.New("unauthenticated")
+	ErrUniqueConflict      = errors.New("concurrent unique conflict")
+	ErrTransient           = errors.New("transient infrastructure failure")
+	ErrInvariantViolation  = errors.New("database invariant violation")
+	ErrNotImplemented      = errors.New("not implemented")
+	ErrUnauthenticated     = errors.New("unauthenticated")
+	ErrTransactionNotFound = errors.New("transaction not found")
 )
 
 // KeyMismatchError carries the id of the operation registered under another key.

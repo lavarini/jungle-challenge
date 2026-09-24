@@ -62,6 +62,11 @@ func principalFrom(ctx context.Context) app.Principal {
 // require authenticates the bearer token and checks the role before any use
 // case runs. Rejections never reach the database.
 func (a *api) require(role app.Role, next http.HandlerFunc) http.Handler {
+	return a.requireAny(next, role)
+}
+
+// requireAny admits a caller holding at least one of roles.
+func (a *api) requireAny(next http.HandlerFunc, roles ...app.Role) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		scheme, raw, ok := strings.Cut(r.Header.Get("Authorization"), " ")
 		if !ok || !strings.EqualFold(scheme, "Bearer") || raw == "" {
@@ -74,11 +79,13 @@ func (a *api) require(role app.Role, next http.HandlerFunc) http.Handler {
 			a.writeUnauthenticated(w, r)
 			return
 		}
-		if !p.Has(role) {
-			writeProblem(w, http.StatusForbidden, "FORBIDDEN", "caller lacks the required role", false, "")
-			return
+		for _, role := range roles {
+			if p.Has(role) {
+				next(w, r.WithContext(context.WithValue(r.Context(), principalKey, p)))
+				return
+			}
 		}
-		next(w, r.WithContext(context.WithValue(r.Context(), principalKey, p)))
+		writeProblem(w, http.StatusForbidden, "FORBIDDEN", "caller lacks the required role", false, "")
 	})
 }
 

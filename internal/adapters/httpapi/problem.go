@@ -50,6 +50,8 @@ func (a *api) writeError(w http.ResponseWriter, r *http.Request, err error) {
 		writeProblem(w, http.StatusConflict, "WALLET_ALREADY_EXISTS", "a wallet already exists for this player and currency", false, "")
 	case errors.Is(err, app.ErrWalletNotFound):
 		writeProblem(w, http.StatusNotFound, "WALLET_NOT_FOUND", "wallet not found", false, "")
+	case errors.Is(err, app.ErrTransactionNotFound):
+		writeProblem(w, http.StatusNotFound, "TRANSACTION_NOT_FOUND", "transaction not found", false, "")
 	case errors.Is(err, app.ErrWalletMismatch):
 		writeProblem(w, http.StatusBadRequest, "WALLET_MISMATCH", err.Error(), false, "")
 	case errors.Is(err, app.ErrInvalidInput):

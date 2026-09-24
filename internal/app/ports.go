@@ -55,8 +55,21 @@ type TransactionRepository interface {
 	ClaimDuePending(ctx context.Context, now, leaseUntil time.Time, limit int) ([]string, error)
 }
 
+type LedgerRow struct {
+	Seq   int64
+	Entry wallet.LedgerEntry
+}
+
 type LedgerRepository interface {
 	Insert(ctx context.Context, e wallet.LedgerEntry) error
+	// Page returns up to limit entries of the wallet with seq > afterSeq, in seq order.
+	Page(ctx context.Context, walletID string, afterSeq int64, limit int) ([]LedgerRow, error)
+}
+
+// Reconciler reads the stored balance and the ledger totals from one
+// consistent snapshot.
+type Reconciler interface {
+	Totals(ctx context.Context, walletID string) (ReconciliationTotals, error)
 }
 
 type OutboxRepository interface {
