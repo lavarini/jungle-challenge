@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -177,6 +178,31 @@ func deadLetters(t *testing.T, dlq string) map[string]string {
 	return out
 }
 
+// queueDepth returns the input queue's visible plus in-flight message count,
+// so a caller can prove a message was actually received and processed (and
+// then deleted, per Consumer.handle/delete) rather than just never delivered
+// -- a 2s sleep before checking downstream state cannot tell those apart.
+func queueDepth(t *testing.T, queueURL string) int {
+	t.Helper()
+	client, err := env.LocalStack.SQS(context.Background(), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := client.GetQueueAttributes(context.Background(), &sqs.GetQueueAttributesInput{
+		QueueUrl: aws.String(queueURL),
+		AttributeNames: []types.QueueAttributeName{
+			types.QueueAttributeNameApproximateNumberOfMessages,
+			types.QueueAttributeNameApproximateNumberOfMessagesNotVisible,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	visible, _ := strconv.Atoi(out.Attributes[string(types.QueueAttributeNameApproximateNumberOfMessages)])
+	inFlight, _ := strconv.Atoi(out.Attributes[string(types.QueueAttributeNameApproximateNumberOfMessagesNotVisible)])
+	return visible + inFlight
+}
+
 func TestConsumerAppliesAMessageOnceEvenWhenRedelivered(t *testing.T) {
 	s := newStack(t)
 	q := consumerQueues(t)
@@ -191,7 +217,11 @@ func TestConsumerAppliesAMessageOnceEvenWhenRedelivered(t *testing.T) {
 	waitFor(t, 15*time.Second, func() bool {
 		return count(t, s.pool, `SELECT count(*) FROM inbox_messages WHERE message_id = $1`, msg) == 1 && balanceOf(t, s, w.ID) == "90.00"
 	})
-	time.Sleep(2 * time.Second)
+	// Both deliveries must have actually reached the consumer and been
+	// deleted (success or dead letter both delete): a passing inbox count of
+	// 1 alone cannot distinguish "the second delivery was deduplicated" from
+	// "the second delivery was never consumed".
+	waitFor(t, 15*time.Second, func() bool { return queueDepth(t, q.in) == 0 })
 	if got := balanceOf(t, s, w.ID); got != "90.00" {
 		t.Fatalf("balance %s after redelivery", got)
 	}

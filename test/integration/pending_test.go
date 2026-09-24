@@ -189,8 +189,9 @@ func TestConcurrentClaimsAreDisjoint(t *testing.T) {
 		}
 		seen[id] = true
 	}
-	// Scoped to this wallet: Claim is global and other tests share the
-	// database, so idsA/idsB may also contain unrelated leftover rows.
+	// Scoped to this wallet: Claim is global within a database, and this
+	// test's own two pools (a, b) share one per-test database, so idsA/idsB
+	// may also contain the wallet's own rows claimed out of order.
 	rows, err := a.pool.Query(context.Background(), `SELECT id::text FROM wager_transactions WHERE wallet_id = $1 AND status = 'PENDING_REFERENCE'`, w.ID)
 	if err != nil {
 		t.Fatal(err)

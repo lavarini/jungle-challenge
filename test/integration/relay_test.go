@@ -177,11 +177,15 @@ func TestTwoRelaysPublishEachWalletInCommitOrder(t *testing.T) {
 // concurrent relay Acks the head between this query's snapshot and its lock
 // attempt, the row must not be reclaimed and requeued.
 //
-// It runs the same query ClaimHeads runs, with one test-only addition: a
-// pg_sleep between the `heads` snapshot and the `due` lock, to widen that
-// otherwise microsecond-scale race window deterministically. Production has
-// no such sleep; only the WHERE clause under test is copied verbatim from
-// outbox_store.go.
+// It runs ClaimHeads' own query, composed from the exported HeadsCTE and
+// DueRecheck fragments (outbox_store.go) instead of a hand copy, with one
+// test-only addition: a `slowed` CTE stage that pg_sleeps between the heads
+// snapshot and the due lock, to widen that otherwise microsecond-scale race
+// window deterministically. Production has no such sleep. Because the WHERE
+// clause is the same Go constant the production query uses, a change that
+// drops the recheck predicates there makes this test fail too (see the
+// report for the final-fix-B proof: removing the predicates from DueRecheck
+// made this test fail, and restoring them made it pass again).
 func TestClaimHeadsRechecksPublicationUnderConcurrentAck(t *testing.T) {
 	s := newStack(t)
 	ctx := context.Background()
@@ -207,26 +211,27 @@ func TestClaimHeadsRechecksPublicationUnderConcurrentAck(t *testing.T) {
 	}
 	result := make(chan []row, 1)
 	errc := make(chan error, 1)
+	// slowClaimSQL is ClaimHeads' own query with one test-only stage spliced
+	// in between the heads snapshot and the due lock: `slowed` pg_sleeps
+	// before `due` runs, widening the reclaim race deterministically. The
+	// CTE name `due` joins against is the only difference from
+	// outbox_store.claimHeadsSQL; HeadsCTE and DueRecheck are the same Go
+	// constants the production query uses, so this cannot drift from it.
+	slowClaimSQL := `WITH heads AS (` + postgres.HeadsCTE + `), slowed AS (
+			SELECT seq FROM heads, pg_sleep(0.5)
+		), due AS (
+			SELECT o.seq
+			FROM outbox_events o JOIN slowed h ON h.seq = o.seq
+			WHERE ` + postgres.DueRecheck + `
+			ORDER BY o.seq
+			LIMIT $2
+			FOR UPDATE OF o SKIP LOCKED
+		)
+		UPDATE outbox_events o SET claim_id = $3, claim_expires_at = $4, attempts = o.attempts + 1
+		FROM due WHERE o.seq = due.seq
+		RETURNING o.seq, o.event_id::text`
 	go func() {
-		rows, err := s.pool.Query(context.Background(), `WITH heads AS (
-				SELECT DISTINCT ON (partition_key) seq
-				FROM outbox_events
-				WHERE published_at IS NULL AND dead_at IS NULL
-				ORDER BY partition_key, seq
-			), slowed AS (
-				SELECT seq FROM heads, pg_sleep(0.5)
-			), due AS (
-				SELECT o.seq
-				FROM outbox_events o JOIN slowed h ON h.seq = o.seq
-				WHERE o.published_at IS NULL AND o.dead_at IS NULL
-				  AND o.next_attempt_at <= $1 AND (o.claim_expires_at IS NULL OR o.claim_expires_at < $1)
-				ORDER BY o.seq
-				LIMIT $2
-				FOR UPDATE OF o SKIP LOCKED
-			)
-			UPDATE outbox_events o SET claim_id = $3, claim_expires_at = $4, attempts = o.attempts + 1
-			FROM due WHERE o.seq = due.seq
-			RETURNING o.seq, o.event_id::text`, time.Now(), 50, uuid.NewString(), time.Now().Add(30*time.Second))
+		rows, err := s.pool.Query(context.Background(), slowClaimSQL, time.Now(), 50, uuid.NewString(), time.Now().Add(30*time.Second))
 		if err != nil {
 			errc <- err
 			return

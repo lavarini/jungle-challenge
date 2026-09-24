@@ -6,10 +6,13 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/lavarini/backend-challenge-go/internal/adapters/postgres"
 	"github.com/lavarini/backend-challenge-go/internal/app"
+	"github.com/lavarini/backend-challenge-go/internal/platform"
 	"github.com/lavarini/backend-challenge-go/internal/wagering"
 )
 
@@ -130,13 +133,24 @@ func TestReferenceMismatchAndRejectedReference(t *testing.T) {
 	}
 }
 
+// The initial backoff is 1h, not DefaultReferencePolicy's 1s: under load, or
+// with clock drift in the Docker VM, more than 1s can pass between submit and
+// the "still waiting" assertion below, which would make the assertion flake
+// against the container's now() even though nothing was actually woken
+// A 1h backoff makes "still waiting"
+// unambiguous, and comparing the wake against the recorded next_attempt_at
+// instead of wall-clock now() keeps the assertion meaningful regardless of
+// how much time elapses around it.
 func TestRefundBeforeBetWaitsAndIsWokenByTheBet(t *testing.T) {
 	s := newStack(t)
 	ctx := context.Background()
+	slow := s
+	slow.submit = app.NewSubmitWager(postgres.NewUnitOfWork(s.pool), platform.NewSystemClock(), platform.NewUUIDv7(),
+		app.ReferencePolicy{TTL: time.Hour, InitialBackoff: time.Hour, MaxBackoff: time.Hour})
 	w := openWallet(t, s, "100.00")
 	betExternalID := uuid.NewString()
 
-	pending := submit(t, s, referencing(t, w, wagering.Refund, "30.00", betExternalID))
+	pending := submit(t, slow, referencing(t, w, wagering.Refund, "30.00", betExternalID))
 	if pending.Status != wagering.PendingReference || pending.Balance.Valid() {
 		t.Fatalf("pending %+v", pending)
 	}
@@ -146,20 +160,23 @@ func TestRefundBeforeBetWaitsAndIsWokenByTheBet(t *testing.T) {
 	if n := count(t, s.pool, `SELECT count(*) FROM wallet_ledger_entries WHERE transaction_id = $1`, pending.TransactionID); n != 0 {
 		t.Fatalf("pending produced %d ledger entries", n)
 	}
-	var dueBefore bool
-	_ = s.pool.QueryRow(ctx, `SELECT next_attempt_at <= now() FROM wager_transactions WHERE id = $1`, pending.TransactionID).Scan(&dueBefore)
-	if dueBefore {
-		t.Fatal("new pending operation must be scheduled in the future")
+	var before time.Time
+	if err := s.pool.QueryRow(ctx, `SELECT next_attempt_at FROM wager_transactions WHERE id = $1`, pending.TransactionID).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	if !before.After(time.Now().Add(30 * time.Minute)) {
+		t.Fatalf("new pending operation must be scheduled far in the future, next_attempt_at=%s", before)
 	}
 
 	bet := command(t, w, wagering.Bet, "30.00", betExternalID)
 	submit(t, s, bet)
-	var dueAfter bool
-	_ = s.pool.QueryRow(ctx, `SELECT next_attempt_at <= now() FROM wager_transactions WHERE id = $1`, pending.TransactionID).Scan(&dueAfter)
-	if !dueAfter {
-		t.Fatal("processing the reference must wake the pending operation")
+	var after time.Time
+	if err := s.pool.QueryRow(ctx, `SELECT next_attempt_at FROM wager_transactions WHERE id = $1`, pending.TransactionID).Scan(&after); err != nil {
+		t.Fatal(err)
 	}
-
+	if !after.Before(before) {
+		t.Fatalf("processing the reference must wake the pending operation: before=%s after=%s", before, after)
+	}
 }
 
 func TestConcurrentReversalsOnlyOneSucceeds(t *testing.T) {

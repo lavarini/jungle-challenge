@@ -113,7 +113,9 @@ func TestEventsReachTheSubscriberInWalletOrder(t *testing.T) {
 	w := openWallet(t, procs[0], internal, "100.00")
 	for i := 0; i < 3; i++ {
 		b := bet(w, uuid.NewString(), "1.00")
-		call(t, procs[i], http.MethodPost, "/wagering/transactions", provider, "provider-a:"+b["externalTransactionId"].(string), b, nil)
+		if s := call(t, procs[i], http.MethodPost, "/wagering/transactions", provider, "provider-a:"+b["externalTransactionId"].(string), b, nil); s != http.StatusCreated {
+			t.Fatalf("bet %d: %d", i, s)
+		}
 	}
 	rows, err := pool.Query(context.Background(), `SELECT event_id::text FROM outbox_events WHERE partition_key = $1 ORDER BY seq`, w.ID)
 	if err != nil {
@@ -122,12 +124,23 @@ func TestEventsReachTheSubscriberInWalletOrder(t *testing.T) {
 	var want []string
 	for rows.Next() {
 		var id string
-		_ = rows.Scan(&id)
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
 		want = append(want, id)
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 
-	url, _ := env.LocalStack.QueueURL(context.Background(), "wallet-events-audit.fifo")
-	client, _ := env.LocalStack.SQS(context.Background(), "test")
+	url, err := env.LocalStack.QueueURL(context.Background(), "wallet-events-audit.fifo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := env.LocalStack.SQS(context.Background(), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
 	var got []string
 	eventually(t, 30*time.Second, func() bool {
 		out, err := client.ReceiveMessage(context.Background(), &sqs.ReceiveMessageInput{
@@ -138,14 +151,29 @@ func TestEventsReachTheSubscriberInWalletOrder(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, m := range out.Messages {
-			if m.Attributes[string(types.MessageSystemAttributeNameMessageGroupId)] == w.ID {
-				var e struct {
-					EventID string `json:"eventId"`
+			if m.Attributes[string(types.MessageSystemAttributeNameMessageGroupId)] != w.ID {
+				// Not this test's wallet: this queue is shared by every test
+				// in the run, so a foreign message is released immediately
+				// instead of being deleted (which would lose it for its own
+				// test) or left to block behind this receiver's visibility
+				// timeout.
+				if _, err := client.ChangeMessageVisibility(context.Background(), &sqs.ChangeMessageVisibilityInput{
+					QueueUrl: aws.String(url), ReceiptHandle: m.ReceiptHandle, VisibilityTimeout: 0,
+				}); err != nil {
+					t.Errorf("release foreign message: %v", err)
 				}
-				_ = json.Unmarshal([]byte(aws.ToString(m.Body)), &e)
-				got = append(got, e.EventID)
+				continue
 			}
-			_, _ = client.DeleteMessage(context.Background(), &sqs.DeleteMessageInput{QueueUrl: aws.String(url), ReceiptHandle: m.ReceiptHandle})
+			var e struct {
+				EventID string `json:"eventId"`
+			}
+			if err := json.Unmarshal([]byte(aws.ToString(m.Body)), &e); err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, e.EventID)
+			if _, err := client.DeleteMessage(context.Background(), &sqs.DeleteMessageInput{QueueUrl: aws.String(url), ReceiptHandle: m.ReceiptHandle}); err != nil {
+				t.Errorf("delete message: %v", err)
+			}
 		}
 		return len(got) >= len(want)
 	})

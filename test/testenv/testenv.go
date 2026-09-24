@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -20,12 +21,18 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/localstack"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 	"golang.org/x/sync/errgroup"
 )
+
+// TemplateDatabase is the name of the migrated database that Start creates
+// (see startPostgres) and that NewDatabase clones for each test.
+const TemplateDatabase = "wagering"
 
 const (
 	ProviderAID          = "provider-a"
@@ -180,6 +187,80 @@ func startLocalStack(ctx context.Context, env *Env) (testcontainers.Container, e
 	}
 	env.LocalStack = LocalStack{Endpoint: fmt.Sprintf("http://%s:%s", host, port.Port())}
 	return c, nil
+}
+
+// MarkAsTemplate flags the shared, migrated database so it can be used as a
+// CREATE DATABASE ... TEMPLATE source. It must run after migrating and before
+// any test calls NewDatabase.
+func (e *Env) MarkAsTemplate(ctx context.Context) error {
+	conn, err := pgx.Connect(ctx, e.Postgres.SuperDSN)
+	if err != nil {
+		return fmt.Errorf("testenv: mark template: connect: %w", err)
+	}
+	defer conn.Close(ctx)
+	if _, err := conn.Exec(ctx, `ALTER DATABASE `+TemplateDatabase+` WITH is_template = true`); err != nil {
+		return fmt.Errorf("testenv: mark template: %w", err)
+	}
+	return nil
+}
+
+// NewDatabase clones the migrated template database into a fresh, uniquely
+// named database with CREATE DATABASE ... TEMPLATE, and returns Postgres
+// DSNs scoped to it -- the same shape as e.Postgres, so callers build pools
+// from them exactly as they do from e.Postgres today (see test/integration's
+// newStack).
+//
+// This exists because some integration suites claim rows globally by design
+// (the outbox relay's ClaimHeads, the pending resolver's Claim): on a
+// database shared across the whole run, an earlier test's leftover due rows
+// make their claims and assertions order-dependent
+// 
+//
+// t.Cleanup drops the database, WITH (FORCE) so open connections don't block
+// it. Register any pool's Close as a cleanup after calling NewDatabase:
+// t.Cleanup runs last-registered-first, so the pool closes before the drop.
+func (e *Env) NewDatabase(ctx context.Context, t testing.TB) Postgres {
+	t.Helper()
+	super, err := pgx.Connect(ctx, e.Postgres.SuperDSN)
+	if err != nil {
+		t.Fatalf("testenv: new database: connect as superuser: %v", err)
+	}
+	defer super.Close(ctx)
+
+	name := "test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if _, err := super.Exec(ctx, fmt.Sprintf(
+		`CREATE DATABASE %s TEMPLATE %s OWNER wager_migrator STRATEGY WAL_LOG`, name, TemplateDatabase)); err != nil {
+		t.Fatalf("testenv: new database: create %s: %v", name, err)
+	}
+	// Table-level GRANTs are part of the template's schema and are copied
+	// with it, but CONNECT is a property of pg_database, not of the roles,
+	// and a freshly created database does not inherit the template's datacl.
+	if _, err := super.Exec(ctx, fmt.Sprintf(
+		`GRANT CONNECT ON DATABASE %s TO wager_migrator, wager_app`, name)); err != nil {
+		t.Fatalf("testenv: new database: grant connect on %s: %v", name, err)
+	}
+	t.Cleanup(func() {
+		dropCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		conn, err := pgx.Connect(dropCtx, e.Postgres.SuperDSN)
+		if err != nil {
+			return
+		}
+		defer conn.Close(dropCtx)
+		_, _ = conn.Exec(dropCtx, fmt.Sprintf(`DROP DATABASE IF EXISTS %s WITH (FORCE)`, name))
+	})
+
+	host, port := e.Postgres.Host, e.Postgres.Port
+	dsn := func(user, pass string) string {
+		return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, pass, host, port, name)
+	}
+	return Postgres{
+		SuperDSN:    dsn("postgres", "postgres-dev-only"),
+		MigratorDSN: dsn("wager_migrator", "migrator-dev-only"),
+		AppDSN:      dsn("wager_app", "app-dev-only"),
+		Host:        host,
+		Port:        port,
+	}
 }
 
 func (l LocalStack) awsConfig(ctx context.Context, accessKey string) (aws.Config, error) {

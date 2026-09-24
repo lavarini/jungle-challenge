@@ -17,6 +17,7 @@ import (
 	"github.com/lavarini/backend-challenge-go/internal/money"
 	"github.com/lavarini/backend-challenge-go/internal/platform"
 	"github.com/lavarini/backend-challenge-go/internal/wagering"
+	"github.com/lavarini/backend-challenge-go/test/testenv"
 )
 
 type stack struct {
@@ -26,13 +27,35 @@ type stack struct {
 	submit *app.SubmitWager
 }
 
-// newStack builds an independent pool, like a separate process would.
+// testDBs memoizes the per-test database keyed by *testing.T, so every call
+// to newStack(t) or testDatabase(t) within the same test shares the one
+// database cloned for it (like several processes talking to the same
+// database), while different tests never see each other's rows. A subtest
+// (t.Run) has its own *testing.T and so gets its own clone.
+var testDBs sync.Map // map[*testing.T]testenv.Postgres
+
+// testDatabase returns the Postgres DSNs of the database isolated to t,
+// cloning it from the migrated template on first use.
+func testDatabase(t *testing.T) testenv.Postgres {
+	t.Helper()
+	if v, ok := testDBs.Load(t); ok {
+		return v.(testenv.Postgres)
+	}
+	pg := env.NewDatabase(context.Background(), t)
+	testDBs.Store(t, pg)
+	t.Cleanup(func() { testDBs.Delete(t) })
+	return pg
+}
+
+// newStack builds an independent pool, like a separate process would, bound
+// to this test's own database.
 func newStack(t *testing.T) stack {
 	t.Helper()
+	pg := testDatabase(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	pool, err := postgres.NewPool(ctx, postgres.PoolConfig{
-		DSN: env.Postgres.AppDSN, MaxConns: 20, LockTimeout: 2 * time.Second, StatementTimeout: 5 * time.Second,
+		DSN: pg.AppDSN, MaxConns: 20, LockTimeout: 2 * time.Second, StatementTimeout: 5 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -364,7 +387,7 @@ func TestDistinctWalletsProgressWhileOneIsLocked(t *testing.T) {
 	a := openWallet(t, s, "100.00")
 	b := openWallet(t, s, "100.00")
 
-	holder := connect(t, env.Postgres.AppDSN)
+	holder := connect(t, testDatabase(t).AppDSN)
 	lockTx, err := holder.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)

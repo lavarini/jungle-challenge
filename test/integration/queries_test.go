@@ -109,13 +109,24 @@ func TestReconciliationIsConsistentUnderConcurrentBets(t *testing.T) {
 	}
 
 	errs := make(chan error, n+64)
+	// report is a non-blocking send: the watcher below polls every 5ms and
+	// could otherwise produce more errors than the buffer holds and block on
+	// a full channel forever, since nothing drains errs until after
+	// watchDone closes -- which itself waits for the blocked watcher. A
+	// blocking send here would deadlock the test instead of failing it.
+	report := func(err error) {
+		select {
+		case errs <- err:
+		default:
+		}
+	}
 	var wg sync.WaitGroup
 	for i := range cmds {
 		wg.Add(1)
 		go func(c app.SubmitCommand) {
 			defer wg.Done()
 			if _, err := s.submit.Execute(context.Background(), c); err != nil {
-				errs <- err
+				report(err)
 			}
 		}(cmds[i])
 	}
@@ -132,9 +143,9 @@ func TestReconciliationIsConsistentUnderConcurrentBets(t *testing.T) {
 			}
 			got, err := r.Execute(context.Background(), w.ID)
 			if err != nil {
-				errs <- err
+				report(err)
 			} else if !got.Consistent {
-				errs <- fmt.Errorf("inconsistent reconciliation: %+v", got)
+				report(fmt.Errorf("inconsistent reconciliation: %+v", got))
 			}
 			time.Sleep(5 * time.Millisecond)
 		}
