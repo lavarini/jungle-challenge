@@ -29,10 +29,9 @@ func TestAuthorizationRefusalsHaveNoFinancialEffect(t *testing.T) {
 	beforeTx, beforeLedger, beforeOutbox := counts()
 
 	// Let the short-lived token actually expire before we use it below. The
-	// server tolerates OIDC_CLOCK_SKEW (default 30s, unset by the e2e harness)
-	// on top of the 2s lifespan, so 4s is not enough to observe a rejection;
-	// wait past lifespan+skew instead.
-	time.Sleep(34 * time.Second)
+	// e2e harness sets OIDC_CLOCK_SKEW=1s, so the server tolerates the 2s
+	// lifespan plus 1s of skew; wait past that with a small margin.
+	time.Sleep(5 * time.Second)
 
 	// No Authorization header at all: build the request directly, since call/send always sends a bearer.
 	req, err := http.NewRequest(http.MethodGet, "http://"+procs[0].addr+"/wallets/"+w.ID, nil)

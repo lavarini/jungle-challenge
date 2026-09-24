@@ -68,9 +68,15 @@ func run(m *testing.M) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
+	dlqURL, err := env.LocalStack.QueueURL(ctx, "wager-transactions-dlq.fifo")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	topicARN := "arn:aws:sns:us-east-1:" + testenv.Account + ":wallet-events.fifo"
 
 	for i := 1; i <= 3; i++ {
-		p, err := start(binary, dir, fmt.Sprintf("wagerd-%d", i), queueURL)
+		p, err := start(binary, dir, fmt.Sprintf("wagerd-%d", i), queueURL, dlqURL, topicARN)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			stopAll()
@@ -95,7 +101,7 @@ func run(m *testing.M) int {
 	return code
 }
 
-func start(binary, dir, name, queueURL string) (*process, error) {
+func start(binary, dir, name, queueURL, dlqURL, topicARN string) (*process, error) {
 	addr, err := freeAddr()
 	if err != nil {
 		return nil, err
@@ -108,15 +114,20 @@ func start(binary, dir, name, queueURL string) (*process, error) {
 	cmd := exec.Command(binary)
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	cmd.Env = append(os.Environ(),
-		"WAGERD_ROLE=api",
+		"WAGERD_ROLE=all",
 		"HTTP_ADDR="+addr,
 		"DATABASE_URL="+env.Postgres.AppDSN,
 		"OIDC_ISSUER_URL="+env.Keycloak.IssuerURL,
+		"OIDC_CLOCK_SKEW=1s",
 		"AWS_REGION=us-east-1",
 		"AWS_ENDPOINT_URL="+env.LocalStack.Endpoint,
 		"AWS_ACCESS_KEY_ID=test",
 		"AWS_SECRET_ACCESS_KEY=test",
 		"SQS_WAGER_QUEUE_URL="+queueURL,
+		"SQS_WAGER_DLQ_URL="+dlqURL,
+		"SQS_SENDER_PROVIDERS=111111111111=provider-a,222222222222=provider-b",
+		"SNS_EVENTS_TOPIC_ARN="+topicARN,
+		"WORKER_POLL_INTERVAL=100ms",
 		"SHUTDOWN_TIMEOUT=10s",
 	)
 	if err := cmd.Start(); err != nil {

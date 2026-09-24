@@ -36,3 +36,23 @@ existe só para desenvolvimento. Variáveis em [`.env.example`](.env.example).
 | `provider-a` | `provider-a-dev-secret` | `wager:provider`, `provider_id=provider-a` |
 | `provider-b` | `provider-b-dev-secret` | `wager:provider`, `provider_id=provider-b` |
 | `wallet-internal` | `wallet-internal-dev-secret` | `wallet:internal` |
+
+### Mensageria local
+
+| Recurso | Uso |
+|---|---|
+| `wager-transactions.fifo` | entrada de operações (`MessageGroupId = walletId`, `MessageDeduplicationId = messageId`) |
+| `wager-transactions-dlq.fifo` | mensagens inválidas ou não autorizadas (atributos `failureCode` e `reason`) e esgotadas |
+| `wallet-events.fifo` (SNS) | eventos publicados pela outbox |
+| `wallet-events-audit.fifo` | assinante de demonstração do tópico |
+
+Produtores são identificados pela credencial: no LocalStack, a access key
+`111111111111` fala por `provider-a` e `222222222222` por `provider-b`
+(`SQS_SENDER_PROVIDERS`). Enviar uma aposta pela fila:
+
+```sh
+AWS_ACCESS_KEY_ID=111111111111 AWS_SECRET_ACCESS_KEY=test aws --endpoint-url http://localhost:4566 \
+  sqs send-message --queue-url http://localhost:4566/000000000000/wager-transactions.fifo \
+  --message-group-id <walletId> --message-deduplication-id "$(uuidgen)" \
+  --message-body '{"messageId":"msg-1","type":"WagerTransactionRequested","occurredAt":"2026-09-24T12:00:00Z","data":{...}}'
+```
