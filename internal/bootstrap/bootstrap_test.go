@@ -11,7 +11,7 @@ import (
 // ValidateApp checks the graph without running constructors, for every role
 // available on day 1.
 func TestGraphIsValidForEveryRole(t *testing.T) {
-	for _, role := range []config.Role{config.RoleAPI, config.RoleAll} {
+	for _, role := range []config.Role{config.RoleAPI, config.RoleConsumer, config.RoleOutboxRelay, config.RoleReferenceWorker, config.RoleAll} {
 		cfg := config.Config{Role: role}
 		if err := fx.ValidateApp(Options(cfg)); err != nil {
 			t.Errorf("role %s: %v", role, err)

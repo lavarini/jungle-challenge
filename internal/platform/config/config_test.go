@@ -53,8 +53,13 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 			t.Errorf("%s=%s accepted", k, v)
 		}
 	}
-	if _, err := Load(env(map[string]string{"WAGERD_ROLE": "consumer"})); err == nil {
-		t.Error("roles without modules must be rejected on day 1")
+	for _, role := range []string{"api", "consumer", "outbox-relay", "reference-worker", "all"} {
+		if _, err := Load(env(map[string]string{"WAGERD_ROLE": role})); err != nil {
+			t.Errorf("role %s rejected: %v", role, err)
+		}
+	}
+	if _, err := Load(env(map[string]string{"REFERENCE_BACKOFF_INITIAL": "10m", "REFERENCE_BACKOFF_MAX": "1m"})); err == nil {
+		t.Error("max backoff below initial accepted")
 	}
 }
 

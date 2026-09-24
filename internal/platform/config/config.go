@@ -40,6 +40,16 @@ type AWSConfig struct {
 	WagerQueueURL string
 }
 
+type ReferenceConfig struct {
+	TTL, InitialBackoff, MaxBackoff time.Duration
+}
+
+type WorkersConfig struct {
+	PollInterval time.Duration
+	Lease        time.Duration
+	Batch        int
+}
+
 type Config struct {
 	Role            Role
 	HTTPAddr        string
@@ -47,6 +57,8 @@ type Config struct {
 	Database        DatabaseConfig
 	OIDC            OIDCConfig
 	AWS             AWSConfig
+	Reference       ReferenceConfig
+	Workers         WorkersConfig
 }
 
 // Load reads configuration and reports every problem at once.
@@ -91,6 +103,15 @@ func Load(getenv func(string) string) (Config, error) {
 			Region:        required("AWS_REGION"),
 			WagerQueueURL: required("SQS_WAGER_QUEUE_URL"),
 		},
+		Reference: ReferenceConfig{
+			TTL:            duration("REFERENCE_TTL", "24h"),
+			InitialBackoff: duration("REFERENCE_BACKOFF_INITIAL", "1s"),
+			MaxBackoff:     duration("REFERENCE_BACKOFF_MAX", "5m"),
+		},
+		Workers: WorkersConfig{
+			PollInterval: duration("WORKER_POLL_INTERVAL", "500ms"),
+			Lease:        duration("WORKER_LEASE", "30s"),
+		},
 	}
 	c.OIDC.DiscoveryURL = str("OIDC_DISCOVERY_URL", c.OIDC.IssuerURL)
 
@@ -100,10 +121,17 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	c.Database.MaxConns = int32(maxConns)
 
+	batch, err := strconv.Atoi(str("WORKER_BATCH", "50"))
+	if err != nil || batch < 1 {
+		errs = append(errs, errors.New("WORKER_BATCH must be a positive integer"))
+	}
+	c.Workers.Batch = batch
+	if c.Reference.MaxBackoff < c.Reference.InitialBackoff {
+		errs = append(errs, errors.New("REFERENCE_BACKOFF_MAX must be >= REFERENCE_BACKOFF_INITIAL"))
+	}
+
 	switch c.Role {
-	case RoleAPI, RoleAll:
-	case RoleConsumer, RoleOutboxRelay, RoleReferenceWorker:
-		errs = append(errs, fmt.Errorf("WAGERD_ROLE %q is not available yet", c.Role))
+	case RoleAPI, RoleConsumer, RoleOutboxRelay, RoleReferenceWorker, RoleAll:
 	default:
 		errs = append(errs, fmt.Errorf("WAGERD_ROLE %q is unknown", c.Role))
 	}

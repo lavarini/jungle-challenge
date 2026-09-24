@@ -20,5 +20,8 @@ func Options(cfg config.Config) fx.Option {
 	if cfg.Role.Runs(config.RoleAPI) {
 		opts = append(opts, apiModule)
 	}
+	if cfg.Role.Runs(config.RoleReferenceWorker) {
+		opts = append(opts, referenceWorkerModule)
+	}
 	return fx.Options(opts...)
 }

@@ -26,7 +26,7 @@ var coreModule = fx.Module("core",
 		fx.Annotate(postgres.NewUnitOfWork, fx.As(new(app.UnitOfWork))),
 		fx.Annotate(platform.NewSystemClock, fx.As(new(app.Clock))),
 		fx.Annotate(platform.NewUUIDv7, fx.As(new(app.IDGenerator))),
-		app.DefaultReferencePolicy,
+		newReferencePolicy,
 		app.NewOpenWallet,
 		app.NewGetWallet,
 		app.NewSubmitWager,
@@ -60,4 +60,11 @@ func newReadiness(pool *pgxpool.Pool, client *sqs.Client, cfg config.Config) *he
 		health.Check{Name: "postgres", Probe: pool.Ping},
 		health.Check{Name: "sqs", Probe: platform.SQSProbe(client, cfg.AWS.WagerQueueURL)},
 	)
+}
+
+func newReferencePolicy(cfg config.Config) app.ReferencePolicy {
+	return app.ReferencePolicy{
+		TTL: cfg.Reference.TTL, InitialBackoff: cfg.Reference.InitialBackoff,
+		MaxBackoff: cfg.Reference.MaxBackoff, Jitter: app.UpToTwentyPercent,
+	}
 }

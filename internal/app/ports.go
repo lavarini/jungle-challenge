@@ -49,6 +49,9 @@ type TransactionRepository interface {
 	// WakePending makes operations waiting for (providerID, referenceExternalID)
 	// due now (ADR 0010).
 	WakePending(ctx context.Context, providerID, referenceExternalID string, now time.Time) error
+	// ClaimDuePending leases up to limit due PENDING_REFERENCE operations by
+	// moving next_attempt_at to leaseUntil; concurrent claimers skip them.
+	ClaimDuePending(ctx context.Context, now, leaseUntil time.Time, limit int) ([]string, error)
 }
 
 type LedgerRepository interface {

@@ -86,6 +86,22 @@ func (r transactionRepo) WakePending(ctx context.Context, providerID, referenceE
 	return classify(err)
 }
 
+func (r transactionRepo) ClaimDuePending(ctx context.Context, now, leaseUntil time.Time, limit int) ([]string, error) {
+	rows, err := r.q.Query(ctx, `UPDATE wager_transactions SET next_attempt_at = $2, updated_at = $1
+		WHERE id IN (
+			SELECT id FROM wager_transactions
+			WHERE status = 'PENDING_REFERENCE' AND next_attempt_at <= $1
+			ORDER BY next_attempt_at
+			LIMIT $3
+			FOR UPDATE SKIP LOCKED)
+		RETURNING id::text`, now, leaseUntil, limit)
+	if err != nil {
+		return nil, classify(err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	return ids, classify(err)
+}
+
 func (r transactionRepo) FindByIdempotencyKey(ctx context.Context, providerID, key string) (*wagering.Transaction, error) {
 	return scanTransaction(r.q.QueryRow(ctx, `SELECT `+transactionColumns+` FROM wager_transactions
 		WHERE origin = 'EXTERNAL' AND provider_id = $1 AND idempotency_key = $2`, providerID, key))
