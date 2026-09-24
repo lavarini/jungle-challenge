@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: fmt-check vet lint test test-race test-failpoint test-integration test-e2e test-crash up up-multi down smoke
+.PHONY: fmt-check vet lint test test-race test-failpoint test-integration test-e2e test-crash evidence up up-multi down smoke
 
 fmt-check:
 	@out=$$(gofmt -l .); if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
@@ -29,6 +29,9 @@ test-e2e:
 
 test-crash:
 	$(GO) test -tags=e2e -count=1 -timeout=20m ./test/e2e/crash/...
+
+evidence:
+	./scripts/evidence.sh
 
 up:
 	docker compose up --build
