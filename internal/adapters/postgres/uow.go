@@ -53,3 +53,4 @@ func (t pgTx) Wallets() app.WalletRepository           { return walletRepo{q: t.
 func (t pgTx) Transactions() app.TransactionRepository { return transactionRepo{q: t.tx} }
 func (t pgTx) Ledger() app.LedgerRepository            { return ledgerRepo{q: t.tx} }
 func (t pgTx) Outbox() app.OutboxRepository            { return outboxRepo{q: t.tx} }
+func (t pgTx) Inbox() app.InboxRepository              { return inboxRepo{q: t.tx} }

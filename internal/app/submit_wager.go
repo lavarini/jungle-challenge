@@ -34,15 +34,50 @@ func (s *SubmitWager) Execute(ctx context.Context, cmd SubmitCommand) (SubmitRes
 	var result SubmitResult
 	for attempt := 0; ; attempt++ {
 		err = s.uow.Do(ctx, func(ctx context.Context, tx Tx) error {
+			if cmd.Inbox != nil {
+				res, handled, err := s.fromInbox(ctx, tx, cmd.Inbox)
+				if err != nil || handled {
+					result = res
+					return err
+				}
+			}
 			var inner error
 			result, inner = s.submit(ctx, tx, cmd, hash)
-			return inner
+			if inner != nil || cmd.Inbox == nil {
+				return inner
+			}
+			now := s.clock.Now()
+			return tx.Inbox().Insert(ctx, InboxRecord{
+				Consumer: cmd.Inbox.Consumer, MessageID: cmd.Inbox.MessageID, PayloadHash: cmd.Inbox.PayloadHash,
+				TransactionID: result.TransactionID, Outcome: string(result.Status), ReceivedAt: now, CompletedAt: now,
+			})
 		})
 		if errors.Is(err, ErrUniqueConflict) && attempt == 0 {
 			continue
 		}
 		return result, err
 	}
+}
+
+// fromInbox answers a redelivered message from the inbox. A message id reused
+// with another body is refused; the financial idempotency still guards a new
+// message id carrying an operation already applied.
+func (s *SubmitWager) fromInbox(ctx context.Context, tx Tx, ref *InboxRef) (SubmitResult, bool, error) {
+	rec, err := tx.Inbox().Find(ctx, ref.Consumer, ref.MessageID)
+	if err != nil || rec == nil {
+		return SubmitResult{}, false, err
+	}
+	if !bytes.Equal(rec.PayloadHash, ref.PayloadHash) {
+		return SubmitResult{}, false, ErrInboxPayloadMismatch
+	}
+	t, err := tx.Transactions().Get(ctx, rec.TransactionID)
+	if err != nil {
+		return SubmitResult{}, false, err
+	}
+	if t == nil {
+		return SubmitResult{}, false, fmt.Errorf("%w: inbox points to missing transaction %s", ErrInvariantViolation, rec.TransactionID)
+	}
+	return resultOf(t, true), true, nil
 }
 
 func (s *SubmitWager) submit(ctx context.Context, tx Tx, cmd SubmitCommand, hash []byte) (SubmitResult, error) {

@@ -33,3 +33,19 @@ func TestSubmitCommandValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestSubmitCommandValidatesInbox(t *testing.T) {
+	c := sampleCommand(t)
+	c.Inbox = &InboxRef{Consumer: "wager-transactions-consumer", MessageID: "msg-1", PayloadHash: make([]byte, 32)}
+	if err := c.validate(); err != nil {
+		t.Fatalf("valid inbox rejected: %v", err)
+	}
+	c.Inbox.PayloadHash = []byte{1}
+	if err := c.validate(); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("short hash error = %v", err)
+	}
+	c.Inbox = &InboxRef{Consumer: "wager-transactions-consumer", PayloadHash: make([]byte, 32)}
+	if err := c.validate(); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("missing message id error = %v", err)
+	}
+}

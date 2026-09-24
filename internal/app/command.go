@@ -32,6 +32,7 @@ type SubmitCommand struct {
 	CorrelationID                  string
 	CausationID                    string
 	Source                         Source
+	Inbox                          *InboxRef
 }
 
 type SubmitResult struct {
@@ -62,6 +63,11 @@ func (c SubmitCommand) validate() error {
 	}
 	if !c.Money.Valid() {
 		return fmt.Errorf("%w: money is required", ErrInvalidInput)
+	}
+	if c.Inbox != nil {
+		if err := c.Inbox.validate(); err != nil {
+			return err
+		}
 	}
 	return nil
 }

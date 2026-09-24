@@ -26,6 +26,7 @@ type Tx interface {
 	Transactions() TransactionRepository
 	Ledger() LedgerRepository
 	Outbox() OutboxRepository
+	Inbox() InboxRepository
 }
 
 type WalletRepository interface {
@@ -60,4 +61,10 @@ type LedgerRepository interface {
 
 type OutboxRepository interface {
 	Append(ctx context.Context, evs ...events.Envelope) error
+}
+
+// InboxRepository records handled messages; Find returns (nil, nil) when absent.
+type InboxRepository interface {
+	Find(ctx context.Context, consumer, messageID string) (*InboxRecord, error)
+	Insert(ctx context.Context, r InboxRecord) error
 }
