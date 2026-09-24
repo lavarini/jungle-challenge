@@ -72,7 +72,11 @@ func (r *ResolvePending) resolve(ctx context.Context, tx Tx, id string) error {
 	}
 	if d.Status == wagering.PendingReference {
 		if now.Before(t.DeadlineAt()) {
-			if err := t.Reschedule(r.policy.NextAttempt(t.Attempts()+1, now), now); err != nil {
+			next := r.policy.NextAttempt(t.Attempts()+1, now)
+			if next.After(t.DeadlineAt()) {
+				next = t.DeadlineAt()
+			}
+			if err := t.Reschedule(next, now); err != nil {
 				return fmt.Errorf("%w: %w", ErrInvariantViolation, err)
 			}
 			return tx.Transactions().Update(ctx, t)

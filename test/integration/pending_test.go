@@ -7,12 +7,12 @@ import (
 	"context"
 	"io"
 	"log/slog"
-	"sort"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/lavarini/backend-challenge-go/internal/adapters/postgres"
 	"github.com/lavarini/backend-challenge-go/internal/adapters/refworker"
@@ -146,7 +146,9 @@ func TestUnresolvedPendingIsRescheduled(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, id := range ids {
-		_ = r.Resolve(ctx, id)
+		if err := r.Resolve(ctx, id); err != nil {
+			t.Fatalf("resolve %s: %v", id, err)
+		}
 	}
 	var attempts int
 	var future bool
@@ -187,18 +189,27 @@ func TestConcurrentClaimsAreDisjoint(t *testing.T) {
 		}
 		seen[id] = true
 	}
-	var mine []string
-	rows, _ := a.pool.Query(context.Background(), `SELECT id::text FROM wager_transactions WHERE wallet_id = $1 AND status = 'PENDING_REFERENCE'`, w.ID)
-	for rows.Next() {
-		var id string
-		_ = rows.Scan(&id)
-		mine = append(mine, id)
+	// Scoped to this wallet: Claim is global and other tests share the
+	// database, so idsA/idsB may also contain unrelated leftover rows.
+	rows, err := a.pool.Query(context.Background(), `SELECT id::text FROM wager_transactions WHERE wallet_id = $1 AND status = 'PENDING_REFERENCE'`, w.ID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	sort.Strings(mine)
+	mine, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mine) != 10 {
+		t.Fatalf("pending rows for the wallet = %d, want 10", len(mine))
+	}
+	claimed := 0
 	for _, id := range mine {
-		if !seen[id] {
-			t.Fatalf("pending %s claimed by nobody", id)
+		if seen[id] {
+			claimed++
 		}
+	}
+	if claimed != len(mine) {
+		t.Fatalf("idsA+idsB claimed %d of the wallet's %d pending rows, so some were claimed by nobody", claimed, len(mine))
 	}
 }
 
@@ -235,6 +246,23 @@ func TestInvariantViolationBecomesFailed(t *testing.T) {
 	if got := balanceOf(t, s, w.ID); got != "100.00" {
 		t.Fatalf("balance %s: a failed resolution moved money", got)
 	}
+	ids, err := r.Claim(ctx, 1000, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range ids {
+		if id == pending.TransactionID {
+			t.Fatalf("FAILED operation %s claimed again", id)
+		}
+	}
+	// 1 row is expected: the WagerTransactionPendingReference event emitted
+	// at submission. The FAILED transition itself emits no event.
+	if n := count(t, s.pool, `SELECT count(*) FROM outbox_events WHERE aggregate_id = $1`, pending.TransactionID); n != 1 {
+		t.Fatalf("outbox events for a FAILED operation = %d, want 1 (only the pending-reference event)", n)
+	}
+	if n := count(t, s.pool, `SELECT count(*) FROM wallet_ledger_entries WHERE transaction_id = $1`, pending.TransactionID); n != 0 {
+		t.Fatalf("ledger entries for a FAILED operation = %d", n)
+	}
 }
 
 func TestWorkerResolvesInTheBackgroundAndStops(t *testing.T) {
@@ -246,6 +274,11 @@ func TestWorkerResolvesInTheBackgroundAndStops(t *testing.T) {
 
 	worker := refworker.New(r, refworker.Config{Interval: 50 * time.Millisecond, Lease: time.Second, Batch: 50}, quietLog)
 	run := runner.Start(worker.Loop)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = run.Stop(ctx)
+	})
 	submit(t, s, command(t, w, wagering.Bet, "30.00", betExternalID))
 
 	deadline := time.Now().Add(5 * time.Second)

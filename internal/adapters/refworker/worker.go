@@ -48,6 +48,9 @@ func (w *Worker) Loop(run, work context.Context) {
 }
 
 func (w *Worker) tick(run, work context.Context) int {
+	if run.Err() != nil {
+		return 0
+	}
 	ids, err := w.resolver.Claim(work, w.cfg.Batch, w.cfg.Lease)
 	if err != nil {
 		if work.Err() == nil {
