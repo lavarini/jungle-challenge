@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/lavarini/backend-challenge-go/internal/app"
+	"github.com/lavarini/backend-challenge-go/internal/platform/failpoint"
 )
 
 var ErrPermanent = errors.New("outbox: permanent publish failure")
@@ -120,6 +121,7 @@ func (r *Relay) deliver(ctx context.Context, m Message, claim string, leaseUntil
 	var serr error
 	switch {
 	case perr == nil:
+		failpoint.Hit("outbox.after_publish")
 		applied, serr = r.store.Ack(ctx, m.Seq, claim, r.now())
 	case errors.Is(perr, ErrPermanent) && m.Attempts >= r.cfg.MaxPermanentAttempts:
 		log.ErrorContext(ctx, "event quarantined", "error", perr.Error(), "class", "permanent")

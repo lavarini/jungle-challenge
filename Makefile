@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: fmt-check vet lint test test-race test-integration test-e2e up up-multi down smoke
+.PHONY: fmt-check vet lint test test-race test-failpoint test-integration test-e2e up up-multi down smoke
 
 fmt-check:
 	@out=$$(gofmt -l .); if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
@@ -17,6 +17,9 @@ test:
 
 test-race:
 	$(GO) test -race ./...
+
+test-failpoint:
+	$(GO) test -race -tags=failpoint ./internal/platform/failpoint/
 
 test-integration:
 	$(GO) test -race -tags=integration -count=1 -timeout=15m ./test/integration/...

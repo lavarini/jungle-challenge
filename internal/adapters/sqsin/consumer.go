@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
 	"github.com/lavarini/backend-challenge-go/internal/app"
+	"github.com/lavarini/backend-challenge-go/internal/platform/failpoint"
 )
 
 type API interface {
@@ -129,6 +130,7 @@ func (c *Consumer) handle(ctx context.Context, m types.Message) bool {
 	res, err := c.submit.Execute(ctx, cmd)
 	if err == nil {
 		log.InfoContext(ctx, "message handled", "transactionId", res.TransactionID, "outcome", string(res.Status), "replay", res.IdempotentReplay)
+		failpoint.Hit("consumer.after_commit")
 		c.delete(m)
 		return true
 	}

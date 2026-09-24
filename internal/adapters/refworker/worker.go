@@ -5,6 +5,8 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	"github.com/lavarini/backend-challenge-go/internal/platform/failpoint"
 )
 
 type Resolver interface {
@@ -57,6 +59,9 @@ func (w *Worker) tick(run, work context.Context) int {
 			w.log.WarnContext(work, "claim pending operations failed", "error", err.Error(), "class", "transient")
 		}
 		return 0
+	}
+	if len(ids) > 0 {
+		failpoint.Hit("resolver.after_claim")
 	}
 	for _, id := range ids {
 		if run.Err() != nil {
