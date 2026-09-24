@@ -109,6 +109,34 @@ func TestBalanceChanged(t *testing.T) {
 	}
 }
 
+func TestPendingReferenceEvent(t *testing.T) {
+	next := time.Date(2026, 9, 24, 12, 0, 1, 0, time.UTC)
+	d := PendingReferenceData{
+		TransactionID: "t1", Kind: "REFUND", WalletID: "w1", PlayerID: "p1", ProviderID: "provider-a",
+		ExternalTransactionID: "tx-2", RoundID: "r1", GameID: "g1", Money: brl(t, "10.00"),
+		ReferenceExternalTransactionID: "tx-1", NextAttemptAt: next, DeadlineAt: next.Add(24 * time.Hour),
+	}
+	e, err := NewWagerTransactionPendingReference(meta(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.EventType() != TypeWagerTransactionPendingReference || e.AggregateID() != "t1" || e.PartitionKey() != "w1" {
+		t.Fatalf("routing: %s %s %s", e.EventType(), e.AggregateID(), e.PartitionKey())
+	}
+	raw, _ := json.Marshal(e)
+	var got struct {
+		Data map[string]any `json:"data"`
+	}
+	_ = json.Unmarshal(raw, &got)
+	if got.Data["referenceExternalTransactionId"] != "tx-1" || got.Data["deadlineAt"] != "2026-09-25T12:00:01Z" {
+		t.Fatalf("payload: %s", raw)
+	}
+	d.ReferenceExternalTransactionID = ""
+	if _, err := NewWagerTransactionPendingReference(meta(), d); !errors.Is(err, ErrInvalidEvent) {
+		t.Fatalf("missing reference error = %v", err)
+	}
+}
+
 func TestMetaIsRequired(t *testing.T) {
 	m := meta()
 	m.EventID = ""

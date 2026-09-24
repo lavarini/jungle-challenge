@@ -177,6 +177,41 @@ func TestOpening(t *testing.T) {
 	}
 }
 
+func TestResolveReferenceAndReschedule(t *testing.T) {
+	tx := withReference(t, Refund, "10.00")
+	if err := tx.ResolveReference(""); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("empty reference error = %v", err)
+	}
+	if err := tx.Reschedule(t0, t0); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("reschedule before waiting error = %v", err)
+	}
+	if err := tx.AwaitReference(t0.Add(time.Second), t0.Add(time.Hour), t0); err != nil {
+		t.Fatal(err)
+	}
+	next := t0.Add(4 * time.Second)
+	if err := tx.Reschedule(next, t0.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if tx.Attempts() != 1 || !tx.NextAttemptAt().Equal(next) || !tx.DeadlineAt().Equal(t0.Add(time.Hour)) {
+		t.Fatalf("schedule: attempts %d next %v deadline %v", tx.Attempts(), tx.NextAttemptAt(), tx.DeadlineAt())
+	}
+	if err := tx.ResolveReference("bet-internal-id"); err != nil {
+		t.Fatal(err)
+	}
+	if tx.ReferenceTxID() != "bet-internal-id" {
+		t.Fatalf("reference %q", tx.ReferenceTxID())
+	}
+	if err := tx.Process(brl(t, "10.00"), 2, t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.ResolveReference("other"); !errors.Is(err, ErrTerminal) {
+		t.Fatalf("resolve after terminal error = %v", err)
+	}
+	if err := tx.Reschedule(next, t0); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("reschedule after terminal error = %v", err)
+	}
+}
+
 func TestRehydrateRoundTrip(t *testing.T) {
 	tx, _ := NewExternal(externalParams(t, Bet, "10.00"))
 	_ = tx.Process(brl(t, "90.00"), 2, t0)

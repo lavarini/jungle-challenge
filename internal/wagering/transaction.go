@@ -170,6 +170,36 @@ func (t *Transaction) Fail(code FailureCode, now time.Time) error {
 	return nil
 }
 
+// ResolveReference records the internal id of the resolved reference.
+func (t *Transaction) ResolveReference(referenceTxID string) error {
+	if t.status.IsTerminal() {
+		return fmt.Errorf("%w: %s", ErrTerminal, t.status)
+	}
+	if referenceTxID == "" {
+		return fmt.Errorf("%w: empty reference id", ErrInvalidTransition)
+	}
+	t.referenceTxID = referenceTxID
+	return nil
+}
+
+// Reschedule records an unsuccessful resolution attempt and when to retry.
+func (t *Transaction) Reschedule(nextAttemptAt, now time.Time) error {
+	if t.status != PendingReference {
+		return fmt.Errorf("%w: reschedule from %s", ErrInvalidTransition, t.status)
+	}
+	if nextAttemptAt.IsZero() || now.IsZero() {
+		return fmt.Errorf("%w: missing schedule", ErrInvalidTransition)
+	}
+	t.attempts++
+	t.nextAttemptAt, t.updatedAt = nextAttemptAt.UTC(), now.UTC()
+	return nil
+}
+
+func (t *Transaction) ReferenceTxID() string    { return t.referenceTxID }
+func (t *Transaction) Attempts() int            { return t.attempts }
+func (t *Transaction) NextAttemptAt() time.Time { return t.nextAttemptAt }
+func (t *Transaction) DeadlineAt() time.Time    { return t.deadlineAt }
+
 func (t *Transaction) ID() string               { return t.id }
 func (t *Transaction) Origin() Origin           { return t.origin }
 func (t *Transaction) Kind() Kind               { return t.kind }

@@ -57,6 +57,22 @@ type BalanceChangedData struct {
 	WalletVersion int64       `json:"walletVersion"`
 }
 
+type PendingReferenceData struct {
+	TransactionID                  string      `json:"transactionId"`
+	Kind                           string      `json:"kind"`
+	WalletID                       string      `json:"walletId"`
+	PlayerID                       string      `json:"playerId"`
+	ProviderID                     string      `json:"providerId"`
+	ExternalTransactionID          string      `json:"externalTransactionId"`
+	RoundID                        string      `json:"roundId"`
+	GameID                         string      `json:"gameId"`
+	Money                          money.Money `json:"money"`
+	ReferenceExternalTransactionID string      `json:"referenceExternalTransactionId"`
+	Attempts                       int         `json:"attempts"`
+	NextAttemptAt                  time.Time   `json:"nextAttemptAt"`
+	DeadlineAt                     time.Time   `json:"deadlineAt"`
+}
+
 // Envelope is immutable: fields are private and data is held by value.
 type Envelope struct {
 	eventID       string
@@ -89,6 +105,14 @@ func NewWalletBalanceChanged(m Meta, d BalanceChangedData) (Envelope, error) {
 		return Envelope{}, fmt.Errorf("%w: direction %q", ErrInvalidEvent, d.Direction)
 	}
 	return build(m, TypeWalletBalanceChanged, d.WalletID, d.WalletID, d)
+}
+
+func NewWagerTransactionPendingReference(m Meta, d PendingReferenceData) (Envelope, error) {
+	if d.ReferenceExternalTransactionID == "" || d.NextAttemptAt.IsZero() || d.DeadlineAt.IsZero() {
+		return Envelope{}, fmt.Errorf("%w: pending event needs reference and schedule", ErrInvalidEvent)
+	}
+	d.NextAttemptAt, d.DeadlineAt = d.NextAttemptAt.UTC(), d.DeadlineAt.UTC()
+	return build(m, TypeWagerTransactionPendingReference, d.TransactionID, d.WalletID, d)
 }
 
 func build(m Meta, eventType, aggregateID, partitionKey string, data any) (Envelope, error) {
