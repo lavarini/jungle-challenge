@@ -54,6 +54,11 @@ func runOutboxRelay(lc fx.Lifecycle, cfg config.Config, pool *pgxpool.Pool, cloc
 	if err != nil {
 		return err
 	}
+	// Fail startup on a wrong or standard topic instead of quarantining
+	// every partition head with InvalidParameter.
+	if err := snsout.VerifyFIFOTopic(ctx, client, cfg.AWS.EventsTopicARN); err != nil {
+		return err
+	}
 	r := outbox.New(postgres.NewOutboxStore(pool), snsout.New(client, cfg.AWS.EventsTopicARN), outbox.Config{
 		Interval: cfg.Workers.PollInterval, Lease: cfg.Workers.Lease, Batch: cfg.Workers.Batch,
 		MaxPermanentAttempts: 5, InitialBackoff: time.Second, MaxBackoff: 5 * time.Minute,

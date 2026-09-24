@@ -3,6 +3,7 @@ package snsout
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -51,6 +52,40 @@ func TestPublishTreatsConfigurationErrorsAsTransient(t *testing.T) {
 		err := New(&fakeSNS{err: &smithy.GenericAPIError{Code: code, Message: "not now"}}, "arn").Publish(context.Background(), outbox.Message{})
 		if err == nil || errors.Is(err, outbox.ErrPermanent) {
 			t.Fatalf("%s error = %v, want transient (non-nil, not ErrPermanent)", code, err)
+		}
+	}
+}
+
+type fakeTopics struct {
+	attrs map[string]string
+	err   error
+	arn   string
+}
+
+func (f *fakeTopics) GetTopicAttributes(_ context.Context, in *sns.GetTopicAttributesInput, _ ...func(*sns.Options)) (*sns.GetTopicAttributesOutput, error) {
+	f.arn = aws.ToString(in.TopicArn)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &sns.GetTopicAttributesOutput{Attributes: f.attrs}, nil
+}
+
+// A wrong or standard topic would reject every Publish with InvalidParameter
+// and quarantine the whole stream, so the relay refuses to start instead.
+func TestVerifyFIFOTopic(t *testing.T) {
+	ok := &fakeTopics{attrs: map[string]string{"FifoTopic": "true", "ContentBasedDeduplication": "false"}}
+	if err := VerifyFIFOTopic(context.Background(), ok, "arn:events.fifo"); err != nil || ok.arn != "arn:events.fifo" {
+		t.Fatalf("FIFO topic: err %v, asked for %q", err, ok.arn)
+	}
+	bad := map[string]*fakeTopics{
+		"standard topic": {attrs: map[string]string{"TopicArn": "arn:events"}},
+		"fifo false":     {attrs: map[string]string{"FifoTopic": "false"}},
+		"missing topic":  {err: &smithy.GenericAPIError{Code: "NotFound", Message: "Topic does not exist"}},
+	}
+	for name, f := range bad {
+		err := VerifyFIFOTopic(context.Background(), f, "arn:events")
+		if err == nil || !strings.Contains(err.Error(), "arn:events") {
+			t.Errorf("%s: error = %v, want a startup error naming the topic", name, err)
 		}
 	}
 }

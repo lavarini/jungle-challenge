@@ -27,7 +27,7 @@ type InboxRecord struct {
 }
 
 func (r *InboxRef) validate() error {
-	if r.Consumer == "" || r.MessageID == "" || len(r.MessageID) > maxFieldLength || len(r.PayloadHash) != sha256.Size {
+	if r.Consumer == "" || r.MessageID == "" || len(r.MessageID) > MaxFieldLength || len(r.PayloadHash) != sha256.Size {
 		return fmt.Errorf("%w: inbox reference needs consumer, message id and a SHA-256 payload hash", ErrInvalidInput)
 	}
 	return nil

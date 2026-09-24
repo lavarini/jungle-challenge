@@ -14,7 +14,9 @@ const (
 	SourceSQS  Source = "sqs"
 )
 
-const maxFieldLength = 255
+// MaxFieldLength bounds every provider-supplied identifier; edges that
+// validate the same identifiers (for example a lookup path) reuse it.
+const MaxFieldLength = 255
 
 // SubmitCommand is the transport-independent form of a provider operation.
 // Edges normalize UUIDs to lowercase before building it.
@@ -54,12 +56,18 @@ func (c SubmitCommand) validate() error {
 		if v == "" {
 			return fmt.Errorf("%w: %s is required", ErrInvalidInput, field)
 		}
-		if len(v) > maxFieldLength {
-			return fmt.Errorf("%w: %s exceeds %d characters", ErrInvalidInput, field, maxFieldLength)
+		if len(v) > MaxFieldLength {
+			return fmt.Errorf("%w: %s exceeds %d characters", ErrInvalidInput, field, MaxFieldLength)
 		}
 	}
-	if len(c.ReferenceExternalTransactionID) > maxFieldLength {
-		return fmt.Errorf("%w: referenceExternalTransactionId exceeds %d characters", ErrInvalidInput, maxFieldLength)
+	if len(c.ReferenceExternalTransactionID) > MaxFieldLength {
+		return fmt.Errorf("%w: referenceExternalTransactionId exceeds %d characters", ErrInvalidInput, MaxFieldLength)
+	}
+	// Only kinds whose rule reads a reference may carry one: REFUND and
+	// ROLLBACK require it, WIN may name its BET (spec §3). On BET or LOSS it
+	// is a correctable input error rather than a reference to wait for.
+	if c.ReferenceExternalTransactionID != "" && (c.Kind == wagering.Bet || c.Kind == wagering.Loss) {
+		return fmt.Errorf("%w: referenceExternalTransactionId is not allowed for %s", ErrInvalidInput, c.Kind)
 	}
 	if !c.Money.Valid() {
 		return fmt.Errorf("%w: money is required", ErrInvalidInput)

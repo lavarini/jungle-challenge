@@ -62,8 +62,9 @@ type LedgerRow struct {
 
 type LedgerRepository interface {
 	Insert(ctx context.Context, e wallet.LedgerEntry) error
-	// Page returns up to limit entries of the wallet with seq > afterSeq, in seq order.
-	Page(ctx context.Context, walletID string, afterSeq int64, limit int) ([]LedgerRow, error)
+	// Page returns up to limit entries of the wallet with wallet_version >
+	// afterVersion, in wallet_version order.
+	Page(ctx context.Context, walletID string, afterVersion int64, limit int) ([]LedgerRow, error)
 }
 
 // Reconciler reads the stored balance and the ledger totals from one

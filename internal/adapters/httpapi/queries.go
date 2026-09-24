@@ -68,10 +68,9 @@ func providerScope(p app.Principal) string {
 	return p.ProviderID
 }
 
-// maxExternalTransactionIDLength matches maxFieldLength in
-// internal/app/command.go; the field cannot be imported (unexported), so the
-// bound is kept in sync by hand.
-const maxExternalTransactionIDLength = 255
+// maxExternalTransactionIDLength is the bound the use cases apply to every
+// provider identifier, so a lookup accepts exactly what a submit accepts.
+const maxExternalTransactionIDLength = app.MaxFieldLength
 
 func (a *api) getTransaction(w http.ResponseWriter, r *http.Request) {
 	id, err := wire.ParseUUID("transactionId", r.PathValue("transactionId"))

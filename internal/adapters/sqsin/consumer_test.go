@@ -3,12 +3,14 @@ package sqsin
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
@@ -227,5 +229,54 @@ func TestSenderBoundToAnotherProviderIsRejected(t *testing.T) {
 	}
 	if len(f.deleted) != 1 || f.deleted[0] != "h1" {
 		t.Fatalf("dead-lettered message must leave the input queue: deleted %v", f.deleted)
+	}
+}
+
+// A message cut off by shutdown never really failed: spec §4 returns it to the
+// queue at once (visibility 0), without backoff and without spending its
+// retry budget, even when its receive count is already at MaxReceives.
+func TestMessageInterruptedByShutdownIsReleasedImmediately(t *testing.T) {
+	f := &fakeSQS{visibility: map[string]int32{}}
+	s := &fakeSubmitter{errFor: map[string]error{"e1": fmt.Errorf("%w: begin: %w", app.ErrTransient, context.Canceled)}}
+	f.batch = []types.Message{message("h1", "w1", "111111111111", "5", bodyWith("m1", "e1"))}
+	work, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := newTestConsumer(f, s).Poll(context.Background(), work); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := f.visibility["h1"]; !ok || v != 0 {
+		t.Fatalf("visibility = %d (set %v), want 0", v, ok)
+	}
+	if len(f.dlq) != 0 || len(f.deleted) != 0 {
+		t.Fatalf("an interrupted message must stay in the queue: dlq %d deleted %v", len(f.dlq), f.deleted)
+	}
+}
+
+// Outside shutdown a cancellation is an ordinary transient failure.
+func TestCancellationOutsideShutdownBacksOff(t *testing.T) {
+	f := &fakeSQS{visibility: map[string]int32{}}
+	s := &fakeSubmitter{errFor: map[string]error{"e1": context.Canceled}}
+	f.batch = []types.Message{message("h1", "w1", "111111111111", "2", bodyWith("m1", "e1"))}
+	poll(t, newTestConsumer(f, s))
+	if f.visibility["h1"] != 4 {
+		t.Fatalf("visibility = %d, want backoff 2^2 = 4", f.visibility["h1"])
+	}
+}
+
+// The DLQ reason may carry producer text; cutting it mid-rune would make an
+// invalid attribute that SQS can reject.
+func TestDeadLetterReasonIsTruncatedOnARuneBoundary(t *testing.T) {
+	for _, pad := range []string{"", "x"} {
+		f := &fakeSQS{visibility: map[string]int32{}}
+		s := &fakeSubmitter{errFor: map[string]error{"e1": fmt.Errorf("%w: %s%s", app.ErrWalletNotFound, pad, strings.Repeat("é", 200))}}
+		f.batch = []types.Message{message("h1", "w1", "111111111111", "1", bodyWith("m1", "e1"))}
+		poll(t, newTestConsumer(f, s))
+		if len(f.dlq) != 1 {
+			t.Fatalf("pad %q: dlq %d, want 1", pad, len(f.dlq))
+		}
+		reason := aws.ToString(f.dlq[0].MessageAttributes["reason"].StringValue)
+		if len(reason) > 256 || len(reason) < 250 || !utf8.ValidString(reason) {
+			t.Fatalf("pad %q: reason of %d bytes, valid UTF-8 %v", pad, len(reason), utf8.ValidString(reason))
+		}
 	}
 }

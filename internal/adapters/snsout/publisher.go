@@ -55,3 +55,23 @@ func (p *Publisher) Publish(ctx context.Context, m outbox.Message) error {
 	}
 	return err
 }
+
+// TopicAPI is the part of SNS the startup check needs.
+type TopicAPI interface {
+	GetTopicAttributes(ctx context.Context, in *sns.GetTopicAttributesInput, opts ...func(*sns.Options)) (*sns.GetTopicAttributesOutput, error)
+}
+
+// VerifyFIFOTopic fails when the topic cannot be read or is not FIFO. Run at
+// relay startup: a wrong or standard topic answers every Publish that carries
+// a MessageGroupId with InvalidParameter, which is permanent for a real
+// request-shape error and would otherwise quarantine every partition head.
+func VerifyFIFOTopic(ctx context.Context, api TopicAPI, topicARN string) error {
+	out, err := api.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{TopicArn: aws.String(topicARN)})
+	if err != nil {
+		return fmt.Errorf("snsout: read attributes of topic %s: %w", topicARN, err)
+	}
+	if out.Attributes["FifoTopic"] != "true" {
+		return fmt.Errorf("snsout: topic %s is not a FIFO topic (FifoTopic=%q)", topicARN, out.Attributes["FifoTopic"])
+	}
+	return nil
+}

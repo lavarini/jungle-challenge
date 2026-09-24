@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
@@ -131,6 +132,13 @@ func (c *Consumer) handle(ctx context.Context, m types.Message) bool {
 		c.delete(m)
 		return true
 	}
+	// Shutdown cut the handling short (spec §4): the message never really
+	// failed, so it goes back at once and does not spend its retry budget.
+	if errors.Is(err, context.Canceled) && ctx.Err() != nil {
+		log.InfoContext(context.WithoutCancel(ctx), "message interrupted by shutdown; released", "error", err.Error())
+		c.setVisibility(m, 0)
+		return false
+	}
 	if code, permanent := permanentCode(err); permanent {
 		return c.deadLetter(m, env.MessageID, code, err)
 	}
@@ -182,10 +190,7 @@ func (c *Consumer) deadLetter(m types.Message, messageID, code string, cause err
 		group = "unknown"
 	}
 	dedup := aws.ToString(m.MessageId)
-	reason := cause.Error()
-	if len(reason) > 256 {
-		reason = reason[:256]
-	}
+	reason := truncate(cause.Error(), maxReasonLength)
 	_, err := c.api.SendMessage(ctx, &sqs.SendMessageInput{
 		QueueUrl: aws.String(c.cfg.DLQURL), MessageBody: m.Body,
 		MessageGroupId: aws.String(group), MessageDeduplicationId: aws.String(dedup),
@@ -202,6 +207,26 @@ func (c *Consumer) deadLetter(m types.Message, messageID, code string, cause err
 	c.log.Warn("message dead-lettered", "messageId", messageID, "failureCode", code, "class", "permanent")
 	c.delete(m)
 	return true
+}
+
+// maxReasonLength bounds the DLQ reason attribute.
+const maxReasonLength = 256
+
+// truncate cuts s to at most n bytes without splitting a UTF-8 sequence: the
+// reason can carry producer text, and SQS rejects invalid attribute strings.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut := s[:n]
+	for len(cut) > 0 {
+		r, size := utf8.DecodeLastRuneInString(cut)
+		if r != utf8.RuneError || size != 1 {
+			break
+		}
+		cut = cut[:len(cut)-1]
+	}
+	return cut
 }
 
 // delete runs detached from the work context: after a commit the message must
