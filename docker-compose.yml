@@ -90,6 +90,7 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    stop_grace_period: 30s
 
   app2:
     <<: *app

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 
@@ -29,9 +30,11 @@ func classify(err error) error {
 			return fmt.Errorf("%w: %w", app.ErrInvariantViolation, err)
 		case strings.HasPrefix(pgErr.Code, "08"):
 			return fmt.Errorf("%w: %w", app.ErrTransient, err)
+		case strings.HasPrefix(pgErr.Code, "53"):
+			return fmt.Errorf("%w: %w", app.ErrTransient, err)
 		}
 		switch pgErr.Code {
-		case "55P03", "57014", "40001", "40P01", "57P01", "57P02", "57P03", "53300":
+		case "55P03", "57014", "40001", "40P01", "57P01", "57P02", "57P03":
 			return fmt.Errorf("%w: %w", app.ErrTransient, err)
 		}
 		return fmt.Errorf("postgres: %w", err)
@@ -39,7 +42,8 @@ func classify(err error) error {
 	var connectErr *pgconn.ConnectError
 	var netErr net.Error
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) ||
-		errors.As(err, &connectErr) || errors.As(err, &netErr) || pgconn.SafeToRetry(err) {
+		errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) || errors.Is(err, pgconn.ErrConnClosed) ||
+		errors.As(err, &connectErr) || errors.As(err, &netErr) || pgconn.SafeToRetry(err) || pgconn.Timeout(err) {
 		return fmt.Errorf("%w: %w", app.ErrTransient, err)
 	}
 	return err

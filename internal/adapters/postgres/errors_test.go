@@ -3,6 +3,8 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -27,6 +29,9 @@ func TestClassify(t *testing.T) {
 		{"admin shutdown", &pgconn.PgError{Code: "57P01"}, app.ErrTransient},
 		{"connection exception", &pgconn.PgError{Code: "08006"}, app.ErrTransient},
 		{"deadline", context.DeadlineExceeded, app.ErrTransient},
+		{"unexpected eof", io.ErrUnexpectedEOF, app.ErrTransient},
+		{"wrapped eof", fmt.Errorf("%w", io.EOF), app.ErrTransient},
+		{"insufficient resources", &pgconn.PgError{Code: "53200"}, app.ErrTransient},
 		{"passthrough", app.ErrWalletNotFound, app.ErrWalletNotFound},
 	}
 	for _, c := range cases {
