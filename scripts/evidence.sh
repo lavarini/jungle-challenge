@@ -7,10 +7,22 @@
 set -uo pipefail
 OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
-go test -race -json ./... >"$OUT/unit.json" || true
+# The suite runs keep `|| true`: a failing suite must not abort this script,
+# because the generator itself (run below) now turns any missing, skipped or
+# package-level-failed test into a gap instead of a false pass.
+go test -race -json -count=1 ./... >"$OUT/unit.json" || true
 go test -race -json -tags=integration -count=1 -timeout=15m ./test/integration/... >"$OUT/integration.json" || true
 go test -json -tags=e2e -count=1 -timeout=20m ./test/e2e/ >"$OUT/e2e.json" || true
 go test -json -tags=e2e -count=1 -timeout=20m ./test/e2e/crash/... >"$OUT/crash.json" || true
-go run ./cmd/evidence -commit "$(git rev-parse --short HEAD)" -go "$(go env GOVERSION)" -date "$(date -u +%Y-%m-%dT%H:%MZ)" \
-  "$OUT/unit.json" "$OUT/integration.json" "$OUT/e2e.json" "$OUT/crash.json"
+
+commit="$(git rev-parse --short HEAD)"
+if [ -n "$(git status --porcelain)" ]; then
+  commit="${commit}-dirty"
+fi
+
+if ! go run ./cmd/evidence -commit "$commit" -go "$(go env GOVERSION)" -date "$(date -u +%Y-%m-%dT%H:%MZ)" \
+  "$OUT/unit.json" "$OUT/integration.json" "$OUT/e2e.json" "$OUT/crash.json"; then
+  echo "evidence: generator failed, docs/EVIDENCIAS.md not updated" >&2
+  exit 1
+fi
 echo "docs/EVIDENCIAS.md updated"
