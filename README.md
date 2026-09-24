@@ -9,11 +9,30 @@
 - Go 1.27.x
 - Docker com Compose v2
 
-## Comandos
+## Subir e testar
+
+```sh
+docker compose up --build        # Postgres, Keycloak, LocalStack, migrations e a API em :8080
+make smoke                       # abre carteira, aposta e replay com tokens reais do Keycloak
+docker compose --profile multi up --build   # três instâncias: :8080, :8082, :8083
+docker compose --profile multi down -v
+```
 
 | Comando | O que faz |
 |---|---|
-| `make lint` | gofmt e go vet |
-| `make test-race` | testes unitários com `-race` |
-| `make test-integration` | integração com PostgreSQL, Keycloak e LocalStack reais |
-| `make test-e2e` | três processos independentes |
+| `make lint` | gofmt e go vet (inclusive código com build tags) |
+| `make test-race` | testes unitários com `-race`, sem containers |
+| `make test-integration` | PostgreSQL, Keycloak e LocalStack reais via testcontainers |
+| `make test-e2e` | três processos `wagerd` independentes contra a mesma infraestrutura |
+
+Migrations: `wagerd migrate up` e `wagerd migrate down`, com `MIGRATE_DATABASE_URL`
+apontando para a role proprietária `wager_migrator`. O `down` apaga os dados e
+existe só para desenvolvimento. Variáveis em [`.env.example`](.env.example).
+
+### Identidades locais (Keycloak, `client_credentials`)
+
+| Client | Segredo (só desenvolvimento) | Papel |
+|---|---|---|
+| `provider-a` | `provider-a-dev-secret` | `wager:provider`, `provider_id=provider-a` |
+| `provider-b` | `provider-b-dev-secret` | `wager:provider`, `provider_id=provider-b` |
+| `wallet-internal` | `wallet-internal-dev-secret` | `wallet:internal` |
