@@ -8,7 +8,7 @@
 // the boot-time sqs:GetQueueAttributes health probe wired into every role by
 // internal/bootstrap/core.go) are not owned by any single role's adapter
 // package, so attributing them correctly needs human judgement, not a
-// mechanical scan. See deploy/iam/README.md for that gap.
+// mechanical scan. See deploy/iam/README.md.
 package archtest
 
 import (
@@ -33,20 +33,24 @@ type iamPolicy struct {
 }
 
 // expectedIAMActions is the minimal action set per process role (ADR 0016,
-// spec section 5). api and reference-worker call no AWS API.
+// spec section 5). Every role runs /health/ready, which probes the input
+// queue with sqs:GetQueueAttributes (spec section 7); beyond that, api and
+// reference-worker call no AWS API.
 var expectedIAMActions = map[string][]string{
-	"api": {},
+	"api": {"sqs:GetQueueAttributes"},
 	"consumer": {
 		"sqs:ReceiveMessage",
 		"sqs:DeleteMessage",
 		"sqs:ChangeMessageVisibility",
 		"sqs:SendMessage",
+		"sqs:GetQueueAttributes",
 	},
 	"outbox-relay": {
 		"sns:Publish",
 		"sns:GetTopicAttributes",
+		"sqs:GetQueueAttributes",
 	},
-	"reference-worker": {},
+	"reference-worker": {"sqs:GetQueueAttributes"},
 }
 
 func loadIAMPolicy(t *testing.T, role string) iamPolicy {

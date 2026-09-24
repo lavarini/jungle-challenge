@@ -1,4 +1,13 @@
 {
   "Version": "2012-10-17",
-  "Statement": []
+  "Statement": [
+    {
+      "Sid": "ReadinessProbe",
+      "Effect": "Allow",
+      "Action": [
+        "sqs:GetQueueAttributes"
+      ],
+      "Resource": "arn:aws:sqs:us-east-1:000000000000:wager-transactions.fifo"
+    }
+  ]
 }

@@ -18,6 +18,14 @@
         "sqs:SendMessage"
       ],
       "Resource": "arn:aws:sqs:us-east-1:000000000000:wager-transactions-dlq.fifo"
+    },
+    {
+      "Sid": "ReadinessProbe",
+      "Effect": "Allow",
+      "Action": [
+        "sqs:GetQueueAttributes"
+      ],
+      "Resource": "arn:aws:sqs:us-east-1:000000000000:wager-transactions.fifo"
     }
   ]
 }

@@ -9,6 +9,14 @@
         "sns:GetTopicAttributes"
       ],
       "Resource": "arn:aws:sns:us-east-1:000000000000:wallet-events.fifo"
+    },
+    {
+      "Sid": "ReadinessProbe",
+      "Effect": "Allow",
+      "Action": [
+        "sqs:GetQueueAttributes"
+      ],
+      "Resource": "arn:aws:sqs:us-east-1:000000000000:wager-transactions.fifo"
     }
   ]
 }

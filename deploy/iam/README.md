@@ -9,8 +9,9 @@ e a seção 5 da spec de arquitetura.
 | `consumer.json` | `consumer` | `sqs:ReceiveMessage`, `sqs:DeleteMessage`, `sqs:ChangeMessageVisibility` | fila de entrada |
 | | | `sqs:SendMessage` | DLQ |
 | `outbox-relay.json` | `outbox-relay` | `sns:Publish`, `sns:GetTopicAttributes` | tópico de eventos |
-| `api.json` | `api` | nenhuma | — |
-| `reference-worker.json` | `reference-worker` | nenhuma | — |
+| `api.json` | `api` | `sqs:GetQueueAttributes` (prontidão) | fila de entrada |
+| `reference-worker.json` | `reference-worker` | `sqs:GetQueueAttributes` (prontidão) | fila de entrada |
+| todos | todos | `sqs:GetQueueAttributes` (prontidão) | fila de entrada |
 
 `sns:GetTopicAttributes` está na política do relay porque `VerifyFIFOTopic`
 (`internal/adapters/snsout/publisher.go`) é chamado no boot do `outbox-relay`
@@ -18,13 +19,8 @@ e a seção 5 da spec de arquitetura.
 não for FIFO, em vez de deixar cada `Publish` com `MessageGroupId` quarentenar
 com `InvalidParameter`.
 
-`api.json` e `reference-worker.json` têm `Statement: []`: nenhum código desses
-dois papéis chama a SDK da AWS (`internal/bootstrap/api.go` e
-`internal/adapters/refworker/worker.go` não importam `aws-sdk-go-v2/service/*`).
-Um `Statement` vazio não é um documento IAM anexável de verdade — é a forma de
-registrar a decisão "zero ações" e ainda ser JSON válido para o teste. Em um
-ambiente real, esses papéis simplesmente não recebem política de broker
-alguma.
+`api.json` e `reference-worker.json` só têm a declaração `ReadinessProbe`: fora
+da prontidão, nenhum código desses dois papéis chama a SDK da AWS.
 
 ## ARNs
 
@@ -55,16 +51,7 @@ equivalente) em vez de copiar os JSONs literalmente.
   ações esperado — não prova imposição em runtime.
 - **Sem wildcards.** Nenhuma política aqui usa `"*"` em `Action` ou em
   `Resource`; o teste de arquitetura falha se algum arquivo introduzir um.
-- **Verificação de prontidão do SQS não está coberta por estas políticas.**
-  `internal/bootstrap/core.go` registra um `health.Check` que chama
-  `sqs:GetQueueAttributes` na fila de entrada (`platform.SQSProbe`) como parte
-  de `/health/ready`. Esse probe é conectado no módulo `core`, comum a todo
-  papel, mas só é de fato invocado pelo servidor HTTP do papel `api` (ou
-  `all`) quando algo bate em `/health/ready`. Ou seja: com credenciais
-  separadas por papel, o processo `api` precisaria de `sqs:GetQueueAttributes`
-  na fila de entrada só para responder sua própria prontidão — o que
-  contradiz "api: nenhuma ação AWS" listado acima. Isso está fora do escopo
-  deste commit (não mexe em `internal/bootstrap/core.go`) e fica registrado
-  aqui como gap conhecido para uma tarefa futura: mover esse probe para o
-  papel `consumer` (que já tem a permissão) ou aceitar e documentar a ação
-  extra na política do `api`.
+- **Prontidão.** Todo papel responde `/health/ready`, que verifica o Postgres e
+  a fila de entrada com `sqs:GetQueueAttributes` (seção 7 da spec). Por isso as
+  quatro políticas têm a declaração `ReadinessProbe`, restrita a essa ação e a
+  essa fila. É a única ação AWS de `api` e `reference-worker`.
