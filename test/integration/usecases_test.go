@@ -40,7 +40,7 @@ func newStack(t *testing.T) stack {
 	t.Cleanup(pool.Close)
 	uow := postgres.NewUnitOfWork(pool)
 	clock, ids := platform.NewSystemClock(), platform.NewUUIDv7()
-	return stack{pool: pool, open: app.NewOpenWallet(uow, clock, ids), get: app.NewGetWallet(uow), submit: app.NewSubmitWager(uow, clock, ids)}
+	return stack{pool: pool, open: app.NewOpenWallet(uow, clock, ids), get: app.NewGetWallet(uow), submit: app.NewSubmitWager(uow, clock, ids, app.DefaultReferencePolicy())}
 }
 
 func mustBRL(t *testing.T, amount string) money.Money {

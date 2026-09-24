@@ -38,8 +38,17 @@ type WalletRepository interface {
 // TransactionRepository finders return (nil, nil) when nothing matches.
 type TransactionRepository interface {
 	Insert(ctx context.Context, t *wagering.Transaction) error
+	Update(ctx context.Context, t *wagering.Transaction) error
+	Get(ctx context.Context, id string) (*wagering.Transaction, error)
+	GetForUpdate(ctx context.Context, id string) (*wagering.Transaction, error)
 	FindByIdempotencyKey(ctx context.Context, providerID, key string) (*wagering.Transaction, error)
 	FindByExternalID(ctx context.Context, providerID, externalID string) (*wagering.Transaction, error)
+	// HasProcessedReversal reports whether a PROCESSED REFUND or ROLLBACK
+	// references the transaction (ADR 0005).
+	HasProcessedReversal(ctx context.Context, referenceTxID string) (bool, error)
+	// WakePending makes operations waiting for (providerID, referenceExternalID)
+	// due now (ADR 0010).
+	WakePending(ctx context.Context, providerID, referenceExternalID string, now time.Time) error
 }
 
 type LedgerRepository interface {

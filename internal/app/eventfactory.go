@@ -63,3 +63,13 @@ func (f eventFactory) outcome(t *wagering.Transaction, entry *wallet.LedgerEntry
 	}
 	return out, nil
 }
+
+func (f eventFactory) pendingReference(t *wagering.Transaction, causationID string, now time.Time) (events.Envelope, error) {
+	p := t.Provider()
+	return events.NewWagerTransactionPendingReference(f.meta(t.CorrelationID(), causationID, now), events.PendingReferenceData{
+		TransactionID: t.ID(), Kind: string(t.Kind()), WalletID: t.WalletID(), PlayerID: t.PlayerID(),
+		ProviderID: p.ProviderID, ExternalTransactionID: p.ExternalID, RoundID: p.RoundID, GameID: p.GameID,
+		Money: t.Amount(), ReferenceExternalTransactionID: p.ReferenceExternalID, Attempts: t.Attempts(),
+		NextAttemptAt: t.NextAttemptAt(), DeadlineAt: t.DeadlineAt(),
+	})
+}

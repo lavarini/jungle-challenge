@@ -6,20 +6,18 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/lavarini/backend-challenge-go/internal/money"
 	"github.com/lavarini/backend-challenge-go/internal/wagering"
-	"github.com/lavarini/backend-challenge-go/internal/wallet"
 )
 
 type SubmitWager struct {
-	uow    UnitOfWork
-	clock  Clock
-	ids    IDGenerator
-	events eventFactory
+	uow     UnitOfWork
+	clock   Clock
+	ids     IDGenerator
+	settler settler
 }
 
-func NewSubmitWager(uow UnitOfWork, clock Clock, ids IDGenerator) *SubmitWager {
-	return &SubmitWager{uow: uow, clock: clock, ids: ids, events: eventFactory{ids: ids}}
+func NewSubmitWager(uow UnitOfWork, clock Clock, ids IDGenerator, policy ReferencePolicy) *SubmitWager {
+	return &SubmitWager{uow: uow, clock: clock, ids: ids, settler: newSettler(ids, policy)}
 }
 
 // Execute applies a provider operation exactly once. HTTP and SQS share it
@@ -28,9 +26,6 @@ func NewSubmitWager(uow UnitOfWork, clock Clock, ids IDGenerator) *SubmitWager {
 func (s *SubmitWager) Execute(ctx context.Context, cmd SubmitCommand) (SubmitResult, error) {
 	if err := cmd.validate(); err != nil {
 		return SubmitResult{}, err
-	}
-	if cmd.Kind.RequiresReference() || cmd.ReferenceExternalTransactionID != "" {
-		return SubmitResult{}, fmt.Errorf("%w: operations with references", ErrNotImplemented)
 	}
 	hash, err := CanonicalHash(cmd)
 	if err != nil {
@@ -82,55 +77,11 @@ func (s *SubmitWager) submit(ctx context.Context, tx Tx, cmd SubmitCommand, hash
 	if err != nil {
 		return SubmitResult{}, fmt.Errorf("%w: %w", ErrInvalidInput, err)
 	}
-	decision, err := wagering.Decide(t, w.Balance())
-	if err != nil {
-		return SubmitResult{}, fmt.Errorf("%w: %w", ErrInvalidInput, err)
-	}
-
-	var entry *wallet.LedgerEntry
-	ref := wallet.EntryRef{EntryID: s.ids.New(), TransactionID: t.ID()}
-	switch decision.Effect {
-	case wagering.DebitEffect:
-		e, err := w.Debit(t.Amount(), ref, now)
-		if err != nil {
-			return SubmitResult{}, movementError(err)
-		}
-		entry = &e
-	case wagering.CreditEffect:
-		e, err := w.Credit(t.Amount(), ref, now)
-		if err != nil {
-			return SubmitResult{}, movementError(err)
-		}
-		entry = &e
-	}
-
-	if decision.Status == wagering.Processed {
-		err = t.Process(w.Balance(), w.Version(), now)
-	} else {
-		err = t.Reject(decision.FailureCode, w.Balance(), w.Version(), now)
-	}
-	if err != nil {
-		return SubmitResult{}, fmt.Errorf("%w: %w", ErrInvariantViolation, err)
-	}
-
-	// Write order is a contract with the ledger trigger (ADR 0004):
-	// transaction, then wallet, then ledger entry.
-	if err := tx.Transactions().Insert(ctx, t); err != nil {
-		return SubmitResult{}, err
-	}
-	if entry != nil {
-		if err := tx.Wallets().UpdateBalance(ctx, w); err != nil {
-			return SubmitResult{}, err
-		}
-		if err := tx.Ledger().Insert(ctx, *entry); err != nil {
-			return SubmitResult{}, err
-		}
-	}
-	evs, err := s.events.outcome(t, entry, cmd.CausationID, now)
+	decision, _, err := decide(ctx, tx, t, w.Balance())
 	if err != nil {
 		return SubmitResult{}, err
 	}
-	if err := tx.Outbox().Append(ctx, evs...); err != nil {
+	if err := s.settler.settle(ctx, tx, w, t, decision, cmd.CausationID, now, tx.Transactions().Insert); err != nil {
 		return SubmitResult{}, err
 	}
 	return resultOf(t, false), nil
@@ -175,13 +126,4 @@ func resultOf(t *wagering.Transaction, replay bool) SubmitResult {
 		TransactionID: t.ID(), Status: t.Status(), FailureCode: t.FailureCode(),
 		Balance: balance, WalletVersion: version, IdempotentReplay: replay,
 	}
-}
-
-// movementError maps a wallet movement failure. Decide already checked funds,
-// so only an amount that overflows the balance is an input problem.
-func movementError(err error) error {
-	if errors.Is(err, money.ErrOverflow) {
-		return fmt.Errorf("%w: %w", ErrInvalidInput, err)
-	}
-	return fmt.Errorf("%w: %w", ErrInvariantViolation, err)
 }

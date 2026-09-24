@@ -42,6 +42,50 @@ func (r transactionRepo) Insert(ctx context.Context, t *wagering.Transaction) er
 	return classify(err)
 }
 
+func (r transactionRepo) Update(ctx context.Context, t *wagering.Transaction) error {
+	s := t.Snapshot()
+	var resultBalance, resultVersion any
+	if s.ResultWalletVersion > 0 {
+		resultBalance, resultVersion = s.ResultBalance.Minor(), s.ResultWalletVersion
+	}
+	tag, err := r.q.Exec(ctx, `UPDATE wager_transactions SET status = $2, reference_tx_id = $3, failure_code = $4,
+		result_balance_minor = $5, result_wallet_version = $6, attempts = $7, next_attempt_at = $8,
+		deadline_at = $9, updated_at = $10, completed_at = $11
+		WHERE id = $1`,
+		s.ID, string(s.Status), nullString(s.ReferenceTxID), nullString(string(s.FailureCode)),
+		resultBalance, resultVersion, s.Attempts, nullTime(s.NextAttemptAt), nullTime(s.DeadlineAt),
+		s.UpdatedAt, nullTime(s.CompletedAt))
+	if err != nil {
+		return classify(err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("%w: transaction %s not updated", app.ErrInvariantViolation, s.ID)
+	}
+	return nil
+}
+
+func (r transactionRepo) Get(ctx context.Context, id string) (*wagering.Transaction, error) {
+	return scanTransaction(r.q.QueryRow(ctx, `SELECT `+transactionColumns+` FROM wager_transactions WHERE id = $1`, id))
+}
+
+func (r transactionRepo) GetForUpdate(ctx context.Context, id string) (*wagering.Transaction, error) {
+	return scanTransaction(r.q.QueryRow(ctx, `SELECT `+transactionColumns+` FROM wager_transactions WHERE id = $1 FOR UPDATE`, id))
+}
+
+func (r transactionRepo) HasProcessedReversal(ctx context.Context, referenceTxID string) (bool, error) {
+	var exists bool
+	err := r.q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM wager_transactions
+		WHERE reference_tx_id = $1 AND status = 'PROCESSED' AND kind IN ('REFUND', 'ROLLBACK'))`, referenceTxID).Scan(&exists)
+	return exists, classify(err)
+}
+
+func (r transactionRepo) WakePending(ctx context.Context, providerID, referenceExternalID string, now time.Time) error {
+	_, err := r.q.Exec(ctx, `UPDATE wager_transactions SET next_attempt_at = $3, updated_at = $3
+		WHERE status = 'PENDING_REFERENCE' AND provider_id = $1 AND reference_external_id = $2 AND next_attempt_at > $3`,
+		providerID, referenceExternalID, now)
+	return classify(err)
+}
+
 func (r transactionRepo) FindByIdempotencyKey(ctx context.Context, providerID, key string) (*wagering.Transaction, error) {
 	return scanTransaction(r.q.QueryRow(ctx, `SELECT `+transactionColumns+` FROM wager_transactions
 		WHERE origin = 'EXTERNAL' AND provider_id = $1 AND idempotency_key = $2`, providerID, key))
