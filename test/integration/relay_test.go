@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/google/uuid"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/lavarini/backend-challenge-go/internal/adapters/outbox"
 	"github.com/lavarini/backend-challenge-go/internal/adapters/postgres"
@@ -53,6 +53,14 @@ func unpublished(t *testing.T, s stack, walletID string) int {
 	return count(t, s.pool, `SELECT count(*) FROM outbox_events WHERE partition_key = $1 AND published_at IS NULL AND dead_at IS NULL`, walletID)
 }
 
+// unpublishedCount is unpublished's error-returning twin, safe to call off
+// the test goroutine (t.Fatal must only run on the goroutine running the test).
+func unpublishedCount(ctx context.Context, s stack, walletID string) (int, error) {
+	var n int
+	err := s.pool.QueryRow(ctx, `SELECT count(*) FROM outbox_events WHERE partition_key = $1 AND published_at IS NULL AND dead_at IS NULL`, walletID).Scan(&n)
+	return n, err
+}
+
 // auditEvents drains the audit queue and returns, per message group, the
 // event ids in delivery order.
 func auditEvents(t *testing.T, groups map[string][]string, within time.Duration, done func() bool) {
@@ -61,7 +69,10 @@ func auditEvents(t *testing.T, groups map[string][]string, within time.Duration,
 	if err != nil {
 		t.Fatal(err)
 	}
-	client, _ := env.LocalStack.SQS(context.Background(), "test")
+	client, err := env.LocalStack.SQS(context.Background(), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
 	deadline := time.Now().Add(within)
 	for !done() && time.Now().Before(deadline) {
 		out, err := client.ReceiveMessage(context.Background(), &sqs.ReceiveMessageInput{
@@ -93,11 +104,17 @@ func dbOrder(t *testing.T, s stack, walletID string) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer rows.Close()
 	var ids []string
 	for rows.Next() {
 		var id string
-		_ = rows.Scan(&id)
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
 		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 	return ids
 }
@@ -112,18 +129,30 @@ func TestTwoRelaysPublishEachWalletInCommitOrder(t *testing.T) {
 	want := dbOrder(t, s, w.ID)
 
 	a, b := newRelay(s, pub, 5*time.Second, 5), newRelay(s, pub, 5*time.Second, 5)
-	var wg sync.WaitGroup
+	g, gctx := errgroup.WithContext(context.Background())
 	for _, r := range []*outbox.Relay{a, b} {
-		wg.Add(1)
-		go func(r *outbox.Relay) {
-			defer wg.Done()
+		g.Go(func() error {
+			// t.Fatal must only run on the goroutine executing the test, so
+			// this loop reports infrastructure errors instead of calling it;
+			// the main goroutine re-checks the outcome after g.Wait().
 			deadline := time.Now().Add(20 * time.Second)
-			for unpublished(t, s, w.ID) > 0 && time.Now().Before(deadline) {
-				_, _ = r.Tick(context.Background())
+			for time.Now().Before(deadline) {
+				n, err := unpublishedCount(gctx, s, w.ID)
+				if err != nil {
+					return err
+				}
+				if n == 0 {
+					return nil
+				}
+				_, _ = r.Tick(gctx)
+				time.Sleep(20 * time.Millisecond)
 			}
-		}(r)
+			return nil
+		})
 	}
-	wg.Wait()
+	if err := g.Wait(); err != nil {
+		t.Fatal(err)
+	}
 	if n := unpublished(t, s, w.ID); n != 0 {
 		t.Fatalf("%d events left unpublished", n)
 	}
@@ -138,6 +167,111 @@ func TestTwoRelaysPublishEachWalletInCommitOrder(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("delivery order %v, want commit order %v", got, want)
 		}
+	}
+}
+
+// TestClaimHeadsRechecksPublicationUnderConcurrentAck reproduces the
+// EvalPlanQual race the recheck in ClaimHeads' `due` WHERE guards against:
+// under READ COMMITTED, a row FOR UPDATE re-evaluates its WHERE clause
+// against the latest committed version once the lock is acquired. If a
+// concurrent relay Acks the head between this query's snapshot and its lock
+// attempt, the row must not be reclaimed and requeued.
+//
+// It runs the same query ClaimHeads runs, with one test-only addition: a
+// pg_sleep between the `heads` snapshot and the `due` lock, to widen that
+// otherwise microsecond-scale race window deterministically. Production has
+// no such sleep; only the WHERE clause under test is copied verbatim from
+// outbox_store.go.
+func TestClaimHeadsRechecksPublicationUnderConcurrentAck(t *testing.T) {
+	s := newStack(t)
+	ctx := context.Background()
+	store := postgres.NewOutboxStore(s.pool)
+	w := openWallet(t, s, "100.00")
+	head := dbOrder(t, s, w.ID)[0]
+
+	// Claim the head under a known claim id, with a lease that is already
+	// expired, so it is otherwise eligible for a reclaim.
+	claim := uuid.NewString()
+	msgs, err := store.ClaimHeads(ctx, time.Now(), 1, claim, time.Now().Add(-time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || msgs[0].EventID != head {
+		t.Fatalf("setup claim: msgs=%v err=%v", msgs, err)
+	}
+	target := msgs[0]
+
+	type row struct {
+		seq int64
+		id  string
+	}
+	result := make(chan []row, 1)
+	errc := make(chan error, 1)
+	go func() {
+		rows, err := s.pool.Query(context.Background(), `WITH heads AS (
+				SELECT DISTINCT ON (partition_key) seq
+				FROM outbox_events
+				WHERE published_at IS NULL AND dead_at IS NULL
+				ORDER BY partition_key, seq
+			), slowed AS (
+				SELECT seq FROM heads, pg_sleep(0.5)
+			), due AS (
+				SELECT o.seq
+				FROM outbox_events o JOIN slowed h ON h.seq = o.seq
+				WHERE o.published_at IS NULL AND o.dead_at IS NULL
+				  AND o.next_attempt_at <= $1 AND (o.claim_expires_at IS NULL OR o.claim_expires_at < $1)
+				ORDER BY o.seq
+				LIMIT $2
+				FOR UPDATE OF o SKIP LOCKED
+			)
+			UPDATE outbox_events o SET claim_id = $3, claim_expires_at = $4, attempts = o.attempts + 1
+			FROM due WHERE o.seq = due.seq
+			RETURNING o.seq, o.event_id::text`, time.Now(), 50, uuid.NewString(), time.Now().Add(30*time.Second))
+		if err != nil {
+			errc <- err
+			return
+		}
+		defer rows.Close()
+		var got []row
+		for rows.Next() {
+			var r row
+			if err := rows.Scan(&r.seq, &r.id); err != nil {
+				errc <- err
+				return
+			}
+			got = append(got, r)
+		}
+		if err := rows.Err(); err != nil {
+			errc <- err
+			return
+		}
+		result <- got
+	}()
+
+	time.Sleep(150 * time.Millisecond) // land inside the delayed reclaim's pg_sleep window
+	if applied, err := store.Ack(ctx, target.Seq, claim, time.Now()); err != nil || !applied {
+		t.Fatalf("racing ack: applied=%v err=%v", applied, err)
+	}
+
+	select {
+	case got := <-result:
+		for _, r := range got {
+			if r.id == head {
+				t.Fatalf("reclaimed the already-acked head %s (seq %d): the due CTE's published_at/dead_at recheck did not exclude it under EvalPlanQual", head, r.seq)
+			}
+		}
+	case err := <-errc:
+		t.Fatal(err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for the delayed reclaim query")
+	}
+
+	var published bool
+	if err := s.pool.QueryRow(ctx, `SELECT published_at IS NOT NULL FROM outbox_events WHERE event_id = $1`, head).Scan(&published); err != nil {
+		t.Fatal(err)
+	}
+	if !published {
+		t.Fatal("head must remain published after the race")
 	}
 }
 

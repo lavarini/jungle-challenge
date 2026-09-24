@@ -25,9 +25,15 @@ type Publisher struct {
 
 func New(api API, topicARN string) *Publisher { return &Publisher{api: api, topicARN: topicARN} }
 
-// permanentCodes are request errors a retry cannot fix.
+// permanentCodes are request-shape errors a retry cannot fix: the payload or
+// its attributes are malformed, so republishing the same message would fail
+// again forever. "NotFound" (missing topic) and "AuthorizationError" are
+// left out on purpose: those can be transient misconfiguration (a topic or
+// policy not yet propagated) that heals without touching the event, so they
+// retry like any other transient error instead of quarantining the event.
 var permanentCodes = map[string]bool{
-	"InvalidParameter": true, "InvalidParameterValue": true, "NotFound": true, "AuthorizationError": true,
+	"InvalidParameter":      true, // InvalidParameterException
+	"ParameterValueInvalid": true, // InvalidParameterValueException (message too large, bad attribute, ...)
 }
 
 // Publish sends the event with the wallet as message group (order per wallet)

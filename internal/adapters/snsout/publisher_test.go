@@ -36,12 +36,21 @@ func TestPublishMapsTheEvent(t *testing.T) {
 }
 
 func TestPublishClassifiesPermanentErrors(t *testing.T) {
-	permanent := &fakeSNS{err: &smithy.GenericAPIError{Code: "InvalidParameter", Message: "bad"}}
-	if err := New(permanent, "arn").Publish(context.Background(), outbox.Message{}); !errors.Is(err, outbox.ErrPermanent) {
-		t.Fatalf("InvalidParameter error = %v", err)
+	for _, code := range []string{"InvalidParameter", "ParameterValueInvalid"} {
+		err := New(&fakeSNS{err: &smithy.GenericAPIError{Code: code, Message: "bad"}}, "arn").Publish(context.Background(), outbox.Message{})
+		if !errors.Is(err, outbox.ErrPermanent) {
+			t.Fatalf("%s error = %v, want permanent", code, err)
+		}
 	}
-	transient := &fakeSNS{err: &smithy.GenericAPIError{Code: "Throttling", Message: "slow down"}}
-	if err := New(transient, "arn").Publish(context.Background(), outbox.Message{}); err == nil || errors.Is(err, outbox.ErrPermanent) {
-		t.Fatalf("Throttling error = %v", err)
+}
+
+// Configuration errors (missing topic, denied caller) can heal without
+// touching the event, so they must retry instead of quarantining it.
+func TestPublishTreatsConfigurationErrorsAsTransient(t *testing.T) {
+	for _, code := range []string{"NotFound", "AuthorizationError", "Throttling"} {
+		err := New(&fakeSNS{err: &smithy.GenericAPIError{Code: code, Message: "not now"}}, "arn").Publish(context.Background(), outbox.Message{})
+		if err == nil || errors.Is(err, outbox.ErrPermanent) {
+			t.Fatalf("%s error = %v, want transient (non-nil, not ErrPermanent)", code, err)
+		}
 	}
 }

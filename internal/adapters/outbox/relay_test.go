@@ -46,18 +46,24 @@ func (f fakePublisher) Publish(_ context.Context, m Message) error { return f.er
 
 var t0 = time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
 
+// identityJitter keeps backoff assertions exact in tests that don't exercise
+// jitter itself.
+func identityJitter(d time.Duration) time.Duration { return d }
+
 func newTestRelay(store Store, pub Publisher) *Relay {
 	return New(store, pub, Config{Interval: time.Millisecond, Lease: 30 * time.Second, Batch: 10, MaxPermanentAttempts: 3,
-		InitialBackoff: time.Second, MaxBackoff: time.Minute},
+		InitialBackoff: time.Second, MaxBackoff: time.Minute, Jitter: identityJitter},
 		func() time.Time { return t0 }, func() string { return "claim-1" }, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 func TestTickRoutesEachOutcome(t *testing.T) {
+	// Deliberately out of seq order: Tick must sort by Seq before delivering,
+	// so the outcomes below still land in commit order (1, 2, 3, 4).
 	store := &fakeStore{applied: true, msgs: []Message{
-		{Seq: 1, Attempts: 1},
-		{Seq: 2, Attempts: 2},
 		{Seq: 3, Attempts: 1},
+		{Seq: 1, Attempts: 1},
 		{Seq: 4, Attempts: 3},
+		{Seq: 2, Attempts: 2},
 	}}
 	pub := fakePublisher{errs: map[int64]error{
 		2: errors.New("throttled"),
@@ -69,6 +75,9 @@ func TestTickRoutesEachOutcome(t *testing.T) {
 		t.Fatalf("Tick = %d, %v", n, err)
 	}
 	want := []string{"ack", "retry", "retry", "dead"}
+	if len(store.calls) != len(want) {
+		t.Fatalf("store.calls = %+v, want %d calls", store.calls, len(want))
+	}
 	for i, c := range store.calls {
 		if c.op != want[i] || c.claim != "claim-1" {
 			t.Fatalf("call %d = %+v, want %s with the tick's claim", i, c, want[i])
@@ -89,9 +98,51 @@ func TestBackoffIsCapped(t *testing.T) {
 	}
 }
 
+// recordingHandler captures emitted records so a test can assert on them
+// instead of only on side effects it cannot observe otherwise.
+type recordingHandler struct{ records []slog.Record }
+
+func (h *recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.records = append(h.records, r)
+	return nil
+}
+func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *recordingHandler) WithGroup(string) slog.Handler      { return h }
+
+// A nil Jitter must default to app.UpToTwentyPercent (ADR 0014), not to no
+// jitter at all.
+func TestNewDefaultsJitterToUpToTwentyPercent(t *testing.T) {
+	r := New(&fakeStore{}, fakePublisher{}, Config{Interval: time.Millisecond, Lease: 30 * time.Second, Batch: 10, MaxPermanentAttempts: 3,
+		InitialBackoff: time.Second, MaxBackoff: time.Minute},
+		func() time.Time { return t0 }, func() string { return "claim-1" }, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	for i := 0; i < 20; i++ {
+		if got := r.backoff(1); got < time.Second || got > time.Second+time.Second/5 {
+			t.Fatalf("backoff(1) = %s, want within [1s, 1.2s] (0-20%% jitter)", got)
+		}
+	}
+}
+
 func TestLostClaimIsNotAnError(t *testing.T) {
 	store := &fakeStore{applied: false, msgs: []Message{{Seq: 1, Attempts: 1}}}
-	if _, err := newTestRelay(store, fakePublisher{}).Tick(context.Background()); err != nil {
+	rec := &recordingHandler{}
+	r := New(store, fakePublisher{}, Config{Interval: time.Millisecond, Lease: 30 * time.Second, Batch: 10, MaxPermanentAttempts: 3,
+		InitialBackoff: time.Second, MaxBackoff: time.Minute, Jitter: identityJitter},
+		func() time.Time { return t0 }, func() string { return "claim-1" }, slog.New(rec))
+
+	if _, err := r.Tick(context.Background()); err != nil {
 		t.Fatalf("a fenced ack must be logged, not failed: %v", err)
+	}
+	if len(store.calls) != 1 || store.calls[0].op != "ack" {
+		t.Fatalf("calls = %+v, want a single ack attempt", store.calls)
+	}
+	found := false
+	for _, entry := range rec.records {
+		if entry.Message == "claim lost to another relay; its outcome stands" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("a fenced write (applied=false) must log that the claim was lost")
 	}
 }

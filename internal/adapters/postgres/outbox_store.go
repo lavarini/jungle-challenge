@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -21,7 +22,12 @@ type OutboxStore struct {
 func NewOutboxStore(pool *pgxpool.Pool) *OutboxStore { return &OutboxStore{pool: pool} }
 
 // ClaimHeads leases the oldest unpublished event of each partition, when it
-// is due and not leased by someone else.
+// is due and not leased by someone else. The published_at/dead_at check is
+// repeated in `due`, not just in `heads`: under READ COMMITTED, a row FOR
+// UPDATE re-evaluates its WHERE clause against the latest committed version
+// once the lock is acquired (EvalPlanQual), so a row Acked or quarantined by
+// a concurrent relay between the `heads` snapshot and the lock must be
+// rejected there too, or it would be reclaimed after it was already settled.
 func (s *OutboxStore) ClaimHeads(ctx context.Context, now time.Time, limit int, claimID string, leaseUntil time.Time) ([]outbox.Message, error) {
 	rows, err := s.pool.Query(ctx, `WITH heads AS (
 			SELECT DISTINCT ON (partition_key) seq
@@ -31,7 +37,8 @@ func (s *OutboxStore) ClaimHeads(ctx context.Context, now time.Time, limit int, 
 		), due AS (
 			SELECT o.seq
 			FROM outbox_events o JOIN heads h ON h.seq = o.seq
-			WHERE o.next_attempt_at <= $1 AND (o.claim_expires_at IS NULL OR o.claim_expires_at < $1)
+			WHERE o.published_at IS NULL AND o.dead_at IS NULL
+			  AND o.next_attempt_at <= $1 AND (o.claim_expires_at IS NULL OR o.claim_expires_at < $1)
 			ORDER BY o.seq
 			LIMIT $2
 			FOR UPDATE OF o SKIP LOCKED
@@ -55,17 +62,17 @@ func (s *OutboxStore) ClaimHeads(ctx context.Context, now time.Time, limit int, 
 
 func (s *OutboxStore) Ack(ctx context.Context, seq int64, claimID string, now time.Time) (bool, error) {
 	return s.fenced(ctx, `UPDATE outbox_events SET published_at = $3, claim_id = NULL, claim_expires_at = NULL, last_error = NULL
-		WHERE seq = $1 AND claim_id = $2`, seq, claimID, now)
+		WHERE seq = $1 AND claim_id = $2 AND published_at IS NULL AND dead_at IS NULL`, seq, claimID, now)
 }
 
 func (s *OutboxStore) Retry(ctx context.Context, seq int64, claimID string, next time.Time, lastErr string) (bool, error) {
 	return s.fenced(ctx, `UPDATE outbox_events SET next_attempt_at = $3, claim_id = NULL, claim_expires_at = NULL, last_error = $4
-		WHERE seq = $1 AND claim_id = $2`, seq, claimID, next, truncate(lastErr))
+		WHERE seq = $1 AND claim_id = $2 AND published_at IS NULL AND dead_at IS NULL`, seq, claimID, next, truncate(lastErr))
 }
 
 func (s *OutboxStore) Dead(ctx context.Context, seq int64, claimID string, now time.Time, lastErr string) (bool, error) {
 	return s.fenced(ctx, `UPDATE outbox_events SET dead_at = $3, claim_id = NULL, claim_expires_at = NULL, last_error = $4
-		WHERE seq = $1 AND claim_id = $2`, seq, claimID, now, truncate(lastErr))
+		WHERE seq = $1 AND claim_id = $2 AND published_at IS NULL AND dead_at IS NULL`, seq, claimID, now, truncate(lastErr))
 }
 
 func (s *OutboxStore) fenced(ctx context.Context, sql string, args ...any) (bool, error) {
@@ -76,9 +83,19 @@ func (s *OutboxStore) fenced(ctx context.Context, sql string, args ...any) (bool
 	return tag.RowsAffected() == 1, nil
 }
 
+// truncate cuts s to at most maxErrorLength bytes, backing off to the
+// nearest rune boundary so it never splits a multi-byte character.
 func truncate(s string) string {
-	if len(s) > maxErrorLength {
-		return s[:maxErrorLength]
+	if len(s) <= maxErrorLength {
+		return s
 	}
-	return s
+	cut := s[:maxErrorLength]
+	for len(cut) > 0 {
+		r, size := utf8.DecodeLastRuneInString(cut)
+		if r != utf8.RuneError || size != 1 {
+			break
+		}
+		cut = cut[:len(cut)-1]
+	}
+	return cut
 }

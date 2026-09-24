@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"sort"
 	"time"
+
+	"github.com/lavarini/backend-challenge-go/internal/app"
 )
 
 var ErrPermanent = errors.New("outbox: permanent publish failure")
@@ -42,6 +44,9 @@ type Config struct {
 	MaxPermanentAttempts int
 	InitialBackoff       time.Duration
 	MaxBackoff           time.Duration
+	// Jitter stretches the backoff to spread retries (ADR 0014); nil
+	// defaults to app.UpToTwentyPercent.
+	Jitter func(time.Duration) time.Duration
 }
 
 type Relay struct {
@@ -54,6 +59,9 @@ type Relay struct {
 }
 
 func New(store Store, pub Publisher, cfg Config, now func() time.Time, newID func() string, log *slog.Logger) *Relay {
+	if cfg.Jitter == nil {
+		cfg.Jitter = app.UpToTwentyPercent
+	}
 	return &Relay{store: store, pub: pub, cfg: cfg, now: now, newID: newID, log: log}
 }
 
@@ -78,20 +86,29 @@ func (r *Relay) Loop(run, work context.Context) {
 func (r *Relay) Tick(ctx context.Context) (int, error) {
 	now := r.now()
 	claim := r.newID()
-	msgs, err := r.store.ClaimHeads(ctx, now, r.cfg.Batch, claim, now.Add(r.cfg.Lease))
+	leaseUntil := now.Add(r.cfg.Lease)
+	msgs, err := r.store.ClaimHeads(ctx, now, r.cfg.Batch, claim, leaseUntil)
 	if err != nil {
 		return 0, err
 	}
 	sort.Slice(msgs, func(i, j int) bool { return msgs[i].Seq < msgs[j].Seq })
 	for _, m := range msgs {
-		r.deliver(ctx, m, claim)
+		// Once ctx is cancelled, further publishes would just time out one
+		// by one; stop and let the leases expire instead of logging a burst
+		// of misleading "publish failed" warnings.
+		if ctx.Err() != nil {
+			break
+		}
+		r.deliver(ctx, m, claim, leaseUntil)
 	}
 	return len(msgs), nil
 }
 
-func (r *Relay) deliver(ctx context.Context, m Message, claim string) {
+func (r *Relay) deliver(ctx context.Context, m Message, claim string, leaseUntil time.Time) {
 	log := r.log.With("eventId", m.EventID, "eventType", m.EventType, "walletId", m.PartitionKey, "attempts", m.Attempts)
-	perr := r.pub.Publish(ctx, m)
+	pctx, cancel := context.WithDeadline(ctx, leaseUntil)
+	perr := r.pub.Publish(pctx, m)
+	cancel()
 	var applied bool
 	var serr error
 	switch {
@@ -113,7 +130,8 @@ func (r *Relay) deliver(ctx context.Context, m Message, claim string) {
 	}
 }
 
-// backoff doubles from InitialBackoff per attempt after the first, up to MaxBackoff.
+// backoff doubles from InitialBackoff per attempt after the first, up to
+// MaxBackoff, then applies Jitter to spread concurrent retries.
 func (r *Relay) backoff(attempts int) time.Duration {
 	d := r.cfg.InitialBackoff
 	for i := 1; i < attempts && d < r.cfg.MaxBackoff; i++ {
@@ -122,5 +140,5 @@ func (r *Relay) backoff(attempts int) time.Duration {
 	if d > r.cfg.MaxBackoff {
 		d = r.cfg.MaxBackoff
 	}
-	return d
+	return r.cfg.Jitter(d)
 }
