@@ -34,10 +34,16 @@ func processEnv(t *testing.T, addr string) map[string]string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	dlqURL, err := env.LocalStack.QueueURL(context.Background(), "wager-transactions-dlq.fifo")
+	if err != nil {
+		t.Fatal(err)
+	}
 	return map[string]string{
 		"WAGERD_ROLE": "all", "HTTP_ADDR": addr, "DATABASE_URL": env.Postgres.AppDSN,
 		"OIDC_ISSUER_URL": env.Keycloak.IssuerURL, "AWS_REGION": "us-east-1",
 		"SQS_WAGER_QUEUE_URL": queueURL, "SHUTDOWN_TIMEOUT": "10s",
+		"SQS_WAGER_DLQ_URL": dlqURL, "SQS_SENDER_PROVIDERS": "111111111111=provider-a",
+		"SNS_EVENTS_TOPIC_ARN": "arn:aws:sns:us-east-1:000000000000:wallet-events.fifo",
 	}
 }
 

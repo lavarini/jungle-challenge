@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -36,8 +37,27 @@ type OIDCConfig struct {
 // AWSConfig carries only what the SDK does not read by itself. Credentials and
 // AWS_ENDPOINT_URL come from the SDK's standard environment variables.
 type AWSConfig struct {
-	Region        string
-	WagerQueueURL string
+	Region         string
+	WagerQueueURL  string
+	DLQURL         string
+	Senders        map[string]string // SenderId -> providerId (ADR 0016)
+	EventsTopicARN string
+}
+
+// ParseSenders reads "senderId=providerId,senderId=providerId".
+func ParseSenders(s string) (map[string]string, error) {
+	out := map[string]string{}
+	if s == "" {
+		return out, nil
+	}
+	for _, pair := range strings.Split(s, ",") {
+		sender, provider, ok := strings.Cut(strings.TrimSpace(pair), "=")
+		if !ok || sender == "" || provider == "" {
+			return nil, fmt.Errorf("SQS_SENDER_PROVIDERS: invalid pair %q", pair)
+		}
+		out[sender] = provider
+	}
+	return out, nil
 }
 
 type ReferenceConfig struct {
@@ -128,6 +148,20 @@ func Load(getenv func(string) string) (Config, error) {
 	c.Workers.Batch = batch
 	if c.Reference.MaxBackoff < c.Reference.InitialBackoff {
 		errs = append(errs, errors.New("REFERENCE_BACKOFF_MAX must be >= REFERENCE_BACKOFF_INITIAL"))
+	}
+
+	c.AWS.DLQURL = getenv("SQS_WAGER_DLQ_URL")
+	c.AWS.EventsTopicARN = getenv("SNS_EVENTS_TOPIC_ARN")
+	senders, err := ParseSenders(getenv("SQS_SENDER_PROVIDERS"))
+	if err != nil {
+		errs = append(errs, err)
+	}
+	c.AWS.Senders = senders
+	if c.Role.Runs(RoleConsumer) && (c.AWS.DLQURL == "" || len(c.AWS.Senders) == 0) {
+		errs = append(errs, errors.New("the consumer role requires SQS_WAGER_DLQ_URL and SQS_SENDER_PROVIDERS"))
+	}
+	if c.Role.Runs(RoleOutboxRelay) && c.AWS.EventsTopicARN == "" {
+		errs = append(errs, errors.New("the outbox-relay role requires SNS_EVENTS_TOPIC_ARN"))
 	}
 
 	switch c.Role {

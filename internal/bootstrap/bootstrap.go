@@ -23,5 +23,8 @@ func Options(cfg config.Config) fx.Option {
 	if cfg.Role.Runs(config.RoleReferenceWorker) {
 		opts = append(opts, referenceWorkerModule)
 	}
+	if cfg.Role.Runs(config.RoleConsumer) {
+		opts = append(opts, consumerModule)
+	}
 	return fx.Options(opts...)
 }

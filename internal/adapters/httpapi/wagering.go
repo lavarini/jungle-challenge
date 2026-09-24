@@ -5,20 +5,21 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/lavarini/backend-challenge-go/internal/adapters/wire"
 	"github.com/lavarini/backend-challenge-go/internal/app"
 	"github.com/lavarini/backend-challenge-go/internal/wagering"
 )
 
 type submitRequest struct {
-	ProviderID                     string   `json:"providerId"`
-	ExternalTransactionID          string   `json:"externalTransactionId"`
-	PlayerID                       string   `json:"playerId"`
-	WalletID                       string   `json:"walletId"`
-	RoundID                        string   `json:"roundId"`
-	GameID                         string   `json:"gameId"`
-	Kind                           string   `json:"kind"`
-	Money                          moneyDTO `json:"money"`
-	ReferenceExternalTransactionID string   `json:"referenceExternalTransactionId,omitempty"`
+	ProviderID                     string     `json:"providerId"`
+	ExternalTransactionID          string     `json:"externalTransactionId"`
+	PlayerID                       string     `json:"playerId"`
+	WalletID                       string     `json:"walletId"`
+	RoundID                        string     `json:"roundId"`
+	GameID                         string     `json:"gameId"`
+	Kind                           string     `json:"kind"`
+	Money                          wire.Money `json:"money"`
+	ReferenceExternalTransactionID string     `json:"referenceExternalTransactionId,omitempty"`
 }
 
 func (a *api) submitWager(w http.ResponseWriter, r *http.Request) {
@@ -56,15 +57,15 @@ func (req submitRequest) toCommand(key, correlation string) (app.SubmitCommand, 
 	if err != nil {
 		return app.SubmitCommand{}, fmt.Errorf("%w: kind: %w", app.ErrInvalidInput, err)
 	}
-	playerID, err := parseUUID("playerId", req.PlayerID)
+	playerID, err := wire.ParseUUID("playerId", req.PlayerID)
 	if err != nil {
 		return app.SubmitCommand{}, err
 	}
-	walletID, err := parseUUID("walletId", req.WalletID)
+	walletID, err := wire.ParseUUID("walletId", req.WalletID)
 	if err != nil {
 		return app.SubmitCommand{}, err
 	}
-	m, err := req.Money.toMoney("money")
+	m, err := req.Money.Parse("money")
 	if err != nil {
 		return app.SubmitCommand{}, err
 	}

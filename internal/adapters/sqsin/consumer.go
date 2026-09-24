@@ -1,0 +1,232 @@
+// Package sqsin consumes wager operations from SQS. Correctness comes from
+// the database (inbox and idempotency); the queue is at-least-once transport.
+package sqsin
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
+
+	"github.com/lavarini/backend-challenge-go/internal/app"
+)
+
+type API interface {
+	ReceiveMessage(ctx context.Context, in *sqs.ReceiveMessageInput, opts ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error)
+	DeleteMessage(ctx context.Context, in *sqs.DeleteMessageInput, opts ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error)
+	ChangeMessageVisibility(ctx context.Context, in *sqs.ChangeMessageVisibilityInput, opts ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityOutput, error)
+	SendMessage(ctx context.Context, in *sqs.SendMessageInput, opts ...func(*sqs.Options)) (*sqs.SendMessageOutput, error)
+}
+
+type Submitter interface {
+	Execute(ctx context.Context, cmd app.SubmitCommand) (app.SubmitResult, error)
+}
+
+type Config struct {
+	QueueURL      string
+	DLQURL        string
+	Senders       map[string]string // SenderId -> providerId (ADR 0016)
+	MaxMessages   int32
+	WaitSeconds   int32
+	MaxVisibility time.Duration
+}
+
+type Consumer struct {
+	api    API
+	submit Submitter
+	cfg    Config
+	log    *slog.Logger
+}
+
+func New(api API, s Submitter, cfg Config, log *slog.Logger) *Consumer {
+	return &Consumer{api: api, submit: s, cfg: cfg, log: log}
+}
+
+// Loop polls while run is alive; message handling uses work so a stop lets
+// messages in flight finish until the deadline.
+func (c *Consumer) Loop(run, work context.Context) {
+	for run.Err() == nil {
+		if err := c.Poll(run, work); err != nil && run.Err() == nil {
+			c.log.WarnContext(work, "receive failed", "error", err.Error(), "class", "transient")
+			select {
+			case <-run.Done():
+			case <-time.After(time.Second):
+			}
+		}
+	}
+}
+
+// Poll receives one batch and handles it: groups in parallel, messages of a
+// group in order.
+func (c *Consumer) Poll(run, work context.Context) error {
+	out, err := c.api.ReceiveMessage(run, &sqs.ReceiveMessageInput{
+		QueueUrl: aws.String(c.cfg.QueueURL), MaxNumberOfMessages: c.cfg.MaxMessages, WaitTimeSeconds: c.cfg.WaitSeconds,
+		MessageSystemAttributeNames: []types.MessageSystemAttributeName{
+			types.MessageSystemAttributeNameSenderId,
+			types.MessageSystemAttributeNameMessageGroupId,
+			types.MessageSystemAttributeNameApproximateReceiveCount,
+		},
+	})
+	if err != nil {
+		if run.Err() != nil {
+			return nil
+		}
+		return err
+	}
+	var order []string
+	groups := map[string][]types.Message{}
+	for _, m := range out.Messages {
+		g := m.Attributes[string(types.MessageSystemAttributeNameMessageGroupId)]
+		if _, seen := groups[g]; !seen {
+			order = append(order, g)
+		}
+		groups[g] = append(groups[g], m)
+	}
+	var wg sync.WaitGroup
+	for _, g := range order {
+		wg.Add(1)
+		go func(msgs []types.Message) {
+			defer wg.Done()
+			for i, m := range msgs {
+				if !c.handle(work, m) {
+					c.release(msgs[i+1:])
+					return
+				}
+			}
+		}(groups[g])
+	}
+	wg.Wait()
+	return nil
+}
+
+// handle returns false when the message stays in the queue for a retry.
+func (c *Consumer) handle(ctx context.Context, m types.Message) bool {
+	body := aws.ToString(m.Body)
+	env, err := parseEnvelope(body)
+	if err != nil {
+		return c.deadLetter(m, "", "INVALID_MESSAGE", err)
+	}
+	log := c.log.With("messageId", env.MessageID, "providerId", env.Data.ProviderID, "walletId", env.Data.WalletID)
+	sender := m.Attributes[string(types.MessageSystemAttributeNameSenderId)]
+	if provider, ok := c.cfg.Senders[sender]; !ok || provider != env.Data.ProviderID {
+		return c.deadLetter(m, env.MessageID, "PROVIDER_NOT_AUTHORIZED", errors.New("sender "+sender+" may not act for "+env.Data.ProviderID))
+	}
+	cmd, err := env.command(body)
+	if err != nil {
+		return c.deadLetter(m, env.MessageID, "INVALID_MESSAGE", err)
+	}
+	res, err := c.submit.Execute(ctx, cmd)
+	if err == nil {
+		log.InfoContext(ctx, "message handled", "transactionId", res.TransactionID, "outcome", string(res.Status), "replay", res.IdempotentReplay)
+		c.delete(m)
+		return true
+	}
+	if code, permanent := permanentCode(err); permanent {
+		return c.deadLetter(m, env.MessageID, code, err)
+	}
+	log.WarnContext(ctx, "message will be retried", "error", err.Error(), "class", "transient")
+	c.retryLater(m)
+	return false
+}
+
+// permanentCode classifies errors that no retry can fix (ADR 0013).
+func permanentCode(err error) (string, bool) {
+	switch {
+	case errors.Is(err, app.ErrWalletNotFound):
+		return "WALLET_NOT_FOUND", true
+	case errors.Is(err, app.ErrWalletMismatch):
+		return "WALLET_MISMATCH", true
+	case errors.Is(err, app.ErrIdempotencyPayloadMismatch):
+		return "IDEMPOTENCY_PAYLOAD_MISMATCH", true
+	case errors.Is(err, app.ErrIdempotencyKeyMismatch):
+		return "IDEMPOTENCY_KEY_MISMATCH", true
+	case errors.Is(err, app.ErrInboxPayloadMismatch):
+		return "INBOX_PAYLOAD_MISMATCH", true
+	case errors.Is(err, app.ErrInvalidInput):
+		return "INVALID_MESSAGE", true
+	case errors.Is(err, app.ErrInvariantViolation):
+		return "INVARIANT_VIOLATION", true
+	}
+	return "", false
+}
+
+// deadLetter copies the message to the DLQ with its reason, then removes it
+// from the input queue. If the copy fails, the message is retried instead.
+func (c *Consumer) deadLetter(m types.Message, messageID, code string, cause error) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	group := m.Attributes[string(types.MessageSystemAttributeNameMessageGroupId)]
+	if group == "" {
+		group = "unknown"
+	}
+	dedup := messageID
+	if dedup == "" {
+		dedup = aws.ToString(m.MessageId)
+	}
+	reason := cause.Error()
+	if len(reason) > 256 {
+		reason = reason[:256]
+	}
+	_, err := c.api.SendMessage(ctx, &sqs.SendMessageInput{
+		QueueUrl: aws.String(c.cfg.DLQURL), MessageBody: m.Body,
+		MessageGroupId: aws.String(group), MessageDeduplicationId: aws.String(dedup),
+		MessageAttributes: map[string]types.MessageAttributeValue{
+			"failureCode": {DataType: aws.String("String"), StringValue: aws.String(code)},
+			"reason":      {DataType: aws.String("String"), StringValue: aws.String(reason)},
+		},
+	})
+	if err != nil {
+		c.log.Error("dead-letter copy failed; message will be retried", "messageId", messageID, "error", err.Error())
+		c.retryLater(m)
+		return false
+	}
+	c.log.Warn("message dead-lettered", "messageId", messageID, "failureCode", code, "class", "permanent")
+	c.delete(m)
+	return true
+}
+
+// delete runs detached from the work context: after a commit the message must
+// be removed even if shutdown began.
+func (c *Consumer) delete(m types.Message) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := c.api.DeleteMessage(ctx, &sqs.DeleteMessageInput{QueueUrl: aws.String(c.cfg.QueueURL), ReceiptHandle: m.ReceiptHandle}); err != nil {
+		c.log.Warn("delete failed; redelivery will be answered by the inbox", "error", err.Error())
+	}
+}
+
+// retryLater hides the message for min(2^receiveCount s, MaxVisibility).
+func (c *Consumer) retryLater(m types.Message) {
+	n, _ := strconv.Atoi(m.Attributes[string(types.MessageSystemAttributeNameApproximateReceiveCount)])
+	delay := time.Second
+	for i := 0; i < n && delay < c.cfg.MaxVisibility; i++ {
+		delay *= 2
+	}
+	if delay > c.cfg.MaxVisibility {
+		delay = c.cfg.MaxVisibility
+	}
+	c.setVisibility(m, int32(delay/time.Second))
+}
+
+// release returns the rest of a group to the queue immediately, keeping order.
+func (c *Consumer) release(msgs []types.Message) {
+	for _, m := range msgs {
+		c.setVisibility(m, 0)
+	}
+}
+
+func (c *Consumer) setVisibility(m types.Message, seconds int32) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := c.api.ChangeMessageVisibility(ctx, &sqs.ChangeMessageVisibilityInput{
+		QueueUrl: aws.String(c.cfg.QueueURL), ReceiptHandle: m.ReceiptHandle, VisibilityTimeout: seconds,
+	}); err != nil {
+		c.log.Warn("change visibility failed", "error", err.Error())
+	}
+}

@@ -8,10 +8,13 @@ import (
 
 func env(overrides map[string]string) func(string) string {
 	base := map[string]string{
-		"DATABASE_URL":        "postgres://wager_app:x@localhost:5432/wagering",
-		"OIDC_ISSUER_URL":     "http://localhost:8081/realms/wagering",
-		"AWS_REGION":          "us-east-1",
-		"SQS_WAGER_QUEUE_URL": "http://localhost:4566/000000000000/wager-transactions.fifo",
+		"DATABASE_URL":         "postgres://wager_app:x@localhost:5432/wagering",
+		"OIDC_ISSUER_URL":      "http://localhost:8081/realms/wagering",
+		"AWS_REGION":           "us-east-1",
+		"SQS_WAGER_QUEUE_URL":  "http://localhost:4566/000000000000/wager-transactions.fifo",
+		"SQS_WAGER_DLQ_URL":    "http://localhost:4566/000000000000/wager-transactions-dlq.fifo",
+		"SQS_SENDER_PROVIDERS": "111111111111=provider-a",
+		"SNS_EVENTS_TOPIC_ARN": "arn:aws:sns:us-east-1:000000000000:wallet-events.fifo",
 	}
 	for k, v := range overrides {
 		base[k] = v
@@ -66,5 +69,18 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 func TestRoleRuns(t *testing.T) {
 	if !RoleAll.Runs(RoleAPI) || !RoleAPI.Runs(RoleAPI) || RoleAPI.Runs(RoleConsumer) {
 		t.Fatal("Runs mismatch")
+	}
+}
+
+func TestParseSenders(t *testing.T) {
+	got, err := ParseSenders("111111111111=provider-a, 222222222222=provider-b")
+	if err != nil || got["111111111111"] != "provider-a" || got["222222222222"] != "provider-b" {
+		t.Fatalf("ParseSenders = %v, %v", got, err)
+	}
+	if _, err := ParseSenders("broken"); err == nil {
+		t.Fatal("pair without '=' accepted")
+	}
+	if _, err := Load(env(map[string]string{"WAGERD_ROLE": "consumer", "SQS_SENDER_PROVIDERS": ""})); err == nil {
+		t.Fatal("consumer without senders accepted")
 	}
 }

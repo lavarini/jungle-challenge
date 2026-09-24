@@ -3,12 +3,13 @@ package httpapi
 import (
 	"net/http"
 
+	"github.com/lavarini/backend-challenge-go/internal/adapters/wire"
 	"github.com/lavarini/backend-challenge-go/internal/app"
 )
 
 type openWalletRequest struct {
-	PlayerID       string   `json:"playerId"`
-	InitialBalance moneyDTO `json:"initialBalance"`
+	PlayerID       string     `json:"playerId"`
+	InitialBalance wire.Money `json:"initialBalance"`
 }
 
 func (a *api) openWallet(w http.ResponseWriter, r *http.Request) {
@@ -17,12 +18,12 @@ func (a *api) openWallet(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	playerID, err := parseUUID("playerId", req.PlayerID)
+	playerID, err := wire.ParseUUID("playerId", req.PlayerID)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	initial, err := req.InitialBalance.toMoney("initialBalance")
+	initial, err := req.InitialBalance.Parse("initialBalance")
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -38,7 +39,7 @@ func (a *api) openWallet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *api) getWallet(w http.ResponseWriter, r *http.Request) {
-	id, err := parseUUID("walletId", r.PathValue("walletId"))
+	id, err := wire.ParseUUID("walletId", r.PathValue("walletId"))
 	if err != nil {
 		a.writeError(w, r, err)
 		return
