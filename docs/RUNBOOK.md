@@ -59,7 +59,7 @@ daquela carteira fica quebrada nesse ponto ([ADR 0014](adr/0014-relay-da-outbox-
 
 `FAILED` significa que o banco recusou uma operação pendente por quebrar uma invariante: saldo
 negativo, cadeia quebrada ou direção incompatível com o tipo
-([ADR 0011](adr/0011-failed-so-para-violacao-de-invariante.md)). Nunca é causado por
+([ADR 0011](adr/0011-failed-e-violacao-de-invariante.md)). Nunca é causado por
 infraestrutura. É um bug de código ou de dados.
 
 1. **Não** reprocessar. A operação fica `FAILED` e nada foi movimentado.
