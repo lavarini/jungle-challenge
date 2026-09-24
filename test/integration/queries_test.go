@@ -167,6 +167,7 @@ func TestStatsSnapshotReadsTheBacklog(t *testing.T) {
 	w := openWallet(t, s, "100.00")
 	submit(t, s, referencing(t, w, wagering.Refund, "10.00", uuid.NewString()))
 	stats := postgres.NewStats(s.pool)
+	time.Sleep(20 * time.Millisecond)
 	now := time.Now()
 
 	far, err := stats.Snapshot(context.Background(), now, 0)
@@ -177,7 +178,7 @@ func TestStatsSnapshotReadsTheBacklog(t *testing.T) {
 		t.Fatalf("pending %d near %d, want 1 and 0", far.PendingReferences, far.PendingNearDeadline)
 	}
 	// The opening and the pending-reference events wait for a relay.
-	if far.OutboxPending < 2 || far.OutboxOldestMillis < 0 {
+	if far.OutboxPending < 2 || far.OutboxOldestMillis <= 0 {
 		t.Fatalf("outbox pending %d oldest %dms", far.OutboxPending, far.OutboxOldestMillis)
 	}
 	near, err := stats.Snapshot(context.Background(), now, 1000*time.Hour)

@@ -269,3 +269,22 @@ func TestRetryLogIsRateLimited(t *testing.T) {
 		t.Fatalf("calls = %d, want every event rescheduled", len(store.calls))
 	}
 }
+
+// A publish cut short by shutdown did not really take that long to fail; it
+// must not skew the latency histogram.
+func TestInterruptedPublishIsNotObserved(t *testing.T) {
+	o := &countingObserver{}
+	store := &fakeStore{applied: true, msgs: []Message{{Seq: 1, Attempts: 1}}}
+	pub := hungPublisher{started: make(chan struct{})}
+	r := New(store, pub, Config{Interval: time.Millisecond, Lease: 30 * time.Second, Batch: 10, MaxPermanentAttempts: 3,
+		InitialBackoff: time.Second, MaxBackoff: time.Minute, Jitter: identityJitter, Observer: o},
+		time.Now, func() string { return "claim-1" }, quietLog())
+	work, stop := context.WithCancel(context.Background())
+	go func() { <-pub.started; stop() }()
+	if _, err := r.Tick(work); err != nil {
+		t.Fatal(err)
+	}
+	if o.publishes != 0 {
+		t.Fatalf("publish durations observed = %d, want 0", o.publishes)
+	}
+}

@@ -43,9 +43,12 @@ func (s submitter) Execute(ctx context.Context, cmd app.SubmitCommand) (app.Subm
 	source := string(cmd.Source)
 	s.m.ObserveProcessing(source, status, time.Since(start))
 	if err == nil {
-		s.m.Transaction(string(cmd.Kind), status, source)
+		// A replay repeats an outcome already counted; it has its own
+		// counter (wager_idempotent_replays_total).
 		if res.IdempotentReplay {
 			s.m.Replay(source, res.FromInbox)
+		} else {
+			s.m.Transaction(string(cmd.Kind), status, source)
 		}
 		return res, nil
 	}

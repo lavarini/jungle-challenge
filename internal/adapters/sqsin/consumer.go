@@ -239,7 +239,7 @@ func (c *Consumer) deadLetter(m types.Message, messageID, code string, cause err
 	if err != nil {
 		c.log.Error("dead-letter copy failed; message will be retried", "messageId", messageID, "error", err.Error())
 		c.cfg.Observer.DLQCopyFailed()
-		c.retryLater(m)
+		c.backOff(m)
 		return false
 	}
 	c.log.Warn("message dead-lettered", "messageId", messageID, "failureCode", code, "class", "permanent")
@@ -285,8 +285,14 @@ func receiveCount(m types.Message) int32 {
 	return int32(n)
 }
 
-// retryLater hides the message for min(2^receiveCount s, MaxVisibility).
+// retryLater counts a delivery retry and backs the message off.
 func (c *Consumer) retryLater(m types.Message) {
+	c.cfg.Observer.Retried()
+	c.backOff(m)
+}
+
+// backOff hides the message for min(2^receiveCount s, MaxVisibility).
+func (c *Consumer) backOff(m types.Message) {
 	n := receiveCount(m)
 	delay := time.Second
 	for i := int32(0); i < n && delay < c.cfg.MaxVisibility; i++ {
@@ -295,7 +301,6 @@ func (c *Consumer) retryLater(m types.Message) {
 	if delay > c.cfg.MaxVisibility {
 		delay = c.cfg.MaxVisibility
 	}
-	c.cfg.Observer.Retried()
 	c.setVisibility(m, int32(delay/time.Second))
 }
 

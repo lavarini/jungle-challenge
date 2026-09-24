@@ -38,6 +38,10 @@ func newReconcile(r app.Reconciler, l *slog.Logger, m *metrics.Metrics) *app.Rec
 // backlogInterval is how often worker roles refresh the backlog gauges.
 const backlogInterval = 15 * time.Second
 
+// snapshotTimeout bounds one backlog query so a stuck database cannot stall
+// the loop past the next refresh.
+const snapshotTimeout = 5 * time.Second
+
 // runBacklogGauges refreshes the backlog gauges (worker roles only, so API
 // replicas do not repeat the queries).
 func runBacklogGauges(lc fx.Lifecycle, d *drain, cfg config.Config, pool *pgxpool.Pool, clock app.Clock, m *metrics.Metrics, l *slog.Logger) {
@@ -45,7 +49,10 @@ func runBacklogGauges(lc fx.Lifecycle, d *drain, cfg config.Config, pool *pgxpoo
 	nearDeadline := cfg.Reference.TTL / 10
 	runLoop(lc, d, "backlog-gauges", func(run, work context.Context) {
 		for run.Err() == nil {
-			if st, err := stats.Snapshot(work, clock.Now(), nearDeadline); err == nil {
+			ctx, cancel := context.WithTimeout(work, snapshotTimeout)
+			st, err := stats.Snapshot(ctx, clock.Now(), nearDeadline)
+			cancel()
+			if err == nil {
 				m.SetPendingReferences(st.PendingReferences, st.PendingNearDeadline)
 				m.SetOutbox(st.OutboxPending, st.OutboxOldestMillis)
 			} else if work.Err() == nil {

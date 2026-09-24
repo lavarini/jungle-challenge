@@ -39,8 +39,9 @@ func TestSubmitterRecordsOutcomes(t *testing.T) {
 	_, _ = NewSubmitter(stub{err: app.ErrUniqueConflict}, m).Execute(context.Background(), cmd)
 	_, _ = NewSubmitter(stub{err: app.ErrInvariantViolation}, m).Execute(context.Background(), cmd)
 
-	if got := testutil.ToFloat64(m.Transactions.WithLabelValues("BET", "PROCESSED", "sqs")); got != 3 {
-		t.Errorf("transactions = %v", got)
+	// Replays have their own counter; only the first outcome is a transaction.
+	if got := testutil.ToFloat64(m.Transactions.WithLabelValues("BET", "PROCESSED", "sqs")); got != 1 {
+		t.Errorf("transactions = %v, want 1 (replays excluded)", got)
 	}
 	if got := testutil.ToFloat64(m.Replays.WithLabelValues("sqs")); got != 2 {
 		t.Errorf("replays = %v", got)

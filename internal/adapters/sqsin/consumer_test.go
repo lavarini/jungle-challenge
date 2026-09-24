@@ -339,7 +339,8 @@ func TestObserverSeesDeadLettersRetriesAndFailedCalls(t *testing.T) {
 	f = &fakeSQS{visibility: map[string]int32{}, failSend: true, failVisibility: true}
 	f.batch = []types.Message{message("h1", "w1", "111111111111", "1", "not json")}
 	poll(t, observedConsumer(f, &fakeSubmitter{}, o))
-	if len(o.dead) != 0 || o.copyFailed != 1 || o.retried != 1 || o.visFailed != 1 {
+	// A failed copy is an operation failure, not a delivery retry.
+	if len(o.dead) != 0 || o.copyFailed != 1 || o.retried != 0 || o.visFailed != 1 {
 		t.Fatalf("failed copy: dead %v copyFailed %d retried %d visibility %d", o.dead, o.copyFailed, o.retried, o.visFailed)
 	}
 

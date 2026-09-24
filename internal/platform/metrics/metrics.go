@@ -52,7 +52,7 @@ func New() *Metrics {
 	f := factory{r: r}
 	m := &Metrics{
 		registry:                  r,
-		Transactions:              f.counterVec("wager_transactions_total", "Operations concluded, by kind, status and source.", "kind", "status", "source"),
+		Transactions:              f.counterVec("wager_transactions_total", "Operation outcomes recorded, by kind, status and source.", "kind", "status", "source"),
 		Replays:                   f.counterVec("wager_idempotent_replays_total", "Idempotent replays, by source.", "source"),
 		InboxDuplicates:           f.counter("inbox_duplicates_total", "SQS deliveries answered from the inbox."),
 		LockConflicts:             f.counterVec("wallet_lock_conflicts_total", "Wallet contention surfaced to callers.", "reason"),
