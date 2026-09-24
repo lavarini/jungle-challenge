@@ -1,8 +1,20 @@
 # Processamento distribuído de apostas em Go
 
-> Em construção. Enunciado em [`docs/DESAFIO.md`](docs/DESAFIO.md); design em
-> [`docs/design.md`](docs/design.md); decisões em
-> [`docs/adr/`](docs/adr/README.md).
+[![ci](https://github.com/lavarini/claude-challenge/actions/workflows/ci.yml/badge.svg)](https://github.com/lavarini/claude-challenge/actions/workflows/ci.yml)
+
+Serviço de carteira e apostas com entrega at-least-once por HTTP e SQS, outbox transacional para
+SNS FIFO e invariantes financeiras impostas no PostgreSQL. O enunciado está em
+[`docs/DESAFIO.md`](docs/DESAFIO.md).
+
+| Documento | Conteúdo |
+|---|---|
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | visão, fluxo, garantias e onde são impostas, falhas, limitações |
+| [`docs/EVIDENCIAS.md`](docs/EVIDENCIAS.md) | cada requisito com os testes que o provam, gerado pela execução |
+| [`docs/adr/`](docs/adr/README.md) | 20 decisões de arquitetura |
+| [`docs/openapi.yaml`](docs/openapi.yaml) | contrato HTTP |
+| [`docs/eventos.md`](docs/eventos.md) | mensagem de entrada e eventos de saída |
+| [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | o que fazer com DLQ, quarentena, `FAILED`, divergência, pendência e backlog |
+| [`docs/design.md`](docs/design.md) | desenho da solução |
 
 ## Pré-requisitos
 
@@ -24,6 +36,12 @@ docker compose --profile multi down -v
 | `make test-race` | testes unitários com `-race`, sem containers |
 | `make test-integration` | PostgreSQL, Keycloak e LocalStack reais via testcontainers |
 | `make test-e2e` | três processos `wagerd` independentes contra a mesma infraestrutura |
+| `make test-crash` | quedas com `kill -9` nas janelas de commit, publicação e claim; reinício e `SIGTERM` |
+| `make test-failpoint` | testes do pacote de failpoints com `-tags failpoint` |
+| `make evidence` | roda todas as suítes com `-json` e regenera `docs/EVIDENCIAS.md` (~4 min) |
+
+Papéis do processo: `WAGERD_ROLE=api|consumer|outbox-relay|reference-worker|all`. O Compose
+roda `all` nas três instâncias.
 
 Migrations: `wagerd migrate up` e `wagerd migrate down`, com `MIGRATE_DATABASE_URL`
 apontando para a role proprietária `wager_migrator`. O `down` apaga os dados e
@@ -54,5 +72,22 @@ Produtores são identificados pela credencial: no LocalStack, a access key
 AWS_ACCESS_KEY_ID=111111111111 AWS_SECRET_ACCESS_KEY=test aws --endpoint-url http://localhost:4566 \
   sqs send-message --queue-url http://localhost:4566/000000000000/wager-transactions.fifo \
   --message-group-id <walletId> --message-deduplication-id "$(uuidgen)" \
-  --message-body '{"messageId":"msg-1","type":"WagerTransactionRequested","occurredAt":"2026-09-24T12:00:00Z","data":{...}}'
+  --message-body '{"messageId":"'"$(uuidgen)"'","type":"WagerTransactionRequested","occurredAt":"2026-09-24T12:00:00Z","data":{...}}'
 ```
+
+O envelope completo e os desfechos de cada mensagem estão em
+[`docs/eventos.md`](docs/eventos.md).
+
+### Métricas e pprof
+
+A porta administrativa (`ADMIN_ADDR`, padrão `:9090`) serve `/metrics`, `/health/ready` e
+`/debug/pprof/`. O Compose não a publica, e a imagem é distroless (sem shell nem `curl`). Para
+inspecionar localmente, entre na rede do container:
+
+```sh
+docker run --rm --network "container:$(docker compose ps -q app)" curlimages/curl -s \
+  localhost:9090/metrics | grep -E '^(wager|outbox|sqs)_'
+```
+
+As métricas seguem a seção 7 da spec, sem identificadores em rótulos. O
+[RUNBOOK](docs/RUNBOOK.md) liga cada alerta a um procedimento.
