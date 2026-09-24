@@ -69,15 +69,15 @@ type ListLedger struct {
 
 func NewListLedger(uow UnitOfWork) *ListLedger { return &ListLedger{uow: uow} }
 
-// Execute pages the ledger in seq order with an opaque cursor.
+// Execute pages the ledger in wallet_version order with an opaque cursor.
+// limit has no default here: callers that want the default must pass it
+// explicitly (the HTTP edge distinguishes an absent query parameter from an
+// explicit 0, which is out of range like any other invalid limit).
 func (l *ListLedger) Execute(ctx context.Context, walletID, cursor string, limit int) (LedgerPage, error) {
-	if limit == 0 {
-		limit = DefaultLedgerLimit
-	}
 	if limit < 1 || limit > MaxLedgerLimit {
 		return LedgerPage{}, fmt.Errorf("%w: limit must be between 1 and %d", ErrInvalidInput, MaxLedgerLimit)
 	}
-	after, err := decodeCursor(cursor)
+	afterVersion, err := decodeCursor(cursor)
 	if err != nil {
 		return LedgerPage{}, err
 	}
@@ -86,13 +86,13 @@ func (l *ListLedger) Execute(ctx context.Context, walletID, cursor string, limit
 		if _, err := tx.Wallets().Get(ctx, walletID); err != nil {
 			return err
 		}
-		rows, err := tx.Ledger().Page(ctx, walletID, after, limit+1)
+		rows, err := tx.Ledger().Page(ctx, walletID, afterVersion, limit+1)
 		if err != nil {
 			return err
 		}
 		if len(rows) > limit {
 			rows = rows[:limit]
-			page.NextCursor = encodeCursor(rows[len(rows)-1].Seq)
+			page.NextCursor = encodeCursor(rows[len(rows)-1].Entry.WalletVersion())
 		}
 		page.Rows = rows
 		return nil
@@ -123,6 +123,17 @@ type ReconciliationTotals struct {
 	Stored             money.Money
 	CreditsMinusDebits int64
 	Entries            int
+	// WalletVersion is the wallet's current version; MaxLedgerVersion is the
+	// highest wallet_version among its ledger entries (0 when Entries == 0).
+	WalletVersion    int64
+	MaxLedgerVersion int64
+	// LastBalanceAfter is the balance_after of the entry with the highest
+	// wallet_version. Meaningless when Entries == 0; Reconcile.Execute only
+	// reads it then.
+	LastBalanceAfter money.Money
+	// CurrencyMismatches counts ledger entries whose currency differs from
+	// the wallet's currency.
+	CurrencyMismatches int
 }
 
 type Reconciliation struct {
@@ -132,6 +143,15 @@ type Reconciliation struct {
 	Difference     money.Money
 	Consistent     bool
 	CheckedEntries int
+	// VersionMismatch: the highest ledger wallet_version does not equal the
+	// wallet's version.
+	VersionMismatch bool
+	// ChainMismatch: the latest ledger entry's balance_after does not equal
+	// the stored balance.
+	ChainMismatch bool
+	// CurrencyMismatches counts ledger entries whose currency differs from
+	// the wallet's currency.
+	CurrencyMismatches int
 }
 
 type Reconcile struct {
@@ -142,7 +162,9 @@ type Reconcile struct {
 func NewReconcile(r Reconciler, log *slog.Logger) *Reconcile { return &Reconcile{reader: r, log: log} }
 
 // Execute rebuilds the balance from the ledger and compares; it never writes.
-// Difference is stored minus calculated.
+// Difference is stored minus calculated. It also checks, from the same
+// snapshot, that the chain (last entry's balance_after), the wallet version
+// and every entry's currency agree with the wallet.
 func (r *Reconcile) Execute(ctx context.Context, walletID string) (Reconciliation, error) {
 	tot, err := r.reader.Totals(ctx, walletID)
 	if err != nil {
@@ -156,10 +178,24 @@ func (r *Reconcile) Execute(ctx context.Context, walletID string) (Reconciliatio
 	if err != nil {
 		return Reconciliation{}, fmt.Errorf("%w: %w", ErrInvariantViolation, err)
 	}
-	res := Reconciliation{WalletID: walletID, Stored: tot.Stored, Calculated: calc, Difference: diff, Consistent: diff.IsZero(), CheckedEntries: tot.Entries}
+	versionMismatch := tot.Entries > 0 && tot.MaxLedgerVersion != tot.WalletVersion
+	var chainMismatch bool
+	if tot.Entries > 0 && tot.LastBalanceAfter.Valid() {
+		cmp, err := tot.Stored.Cmp(tot.LastBalanceAfter)
+		if err != nil {
+			return Reconciliation{}, fmt.Errorf("%w: %w", ErrInvariantViolation, err)
+		}
+		chainMismatch = cmp != 0
+	}
+	res := Reconciliation{
+		WalletID: walletID, Stored: tot.Stored, Calculated: calc, Difference: diff, CheckedEntries: tot.Entries,
+		VersionMismatch: versionMismatch, ChainMismatch: chainMismatch, CurrencyMismatches: tot.CurrencyMismatches,
+	}
+	res.Consistent = diff.IsZero() && !versionMismatch && !chainMismatch && tot.CurrencyMismatches == 0
 	if !res.Consistent {
 		r.log.ErrorContext(ctx, "reconciliation divergence", "walletId", walletID,
-			"stored", tot.Stored.String(), "calculated", calc.String(), "difference", diff.String())
+			"stored", tot.Stored.String(), "calculated", calc.String(), "difference", diff.String(),
+			"versionMismatch", versionMismatch, "chainMismatch", chainMismatch, "currencyMismatches", tot.CurrencyMismatches)
 	}
 	return res, nil
 }

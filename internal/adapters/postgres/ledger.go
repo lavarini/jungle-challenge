@@ -25,10 +25,14 @@ func (r ledgerRepo) Insert(ctx context.Context, e wallet.LedgerEntry) error {
 	return classify(err)
 }
 
-func (r ledgerRepo) Page(ctx context.Context, walletID string, afterSeq int64, limit int) ([]app.LedgerRow, error) {
+// Page keys on wallet_version, not seq: the ledger_wallet_version_key UNIQUE
+// index covers wallet_id, wallet_version and the ledger trigger guarantees
+// wallet_version order equals seq order per wallet, so this seeks on an
+// index instead of scanning by the global seq.
+func (r ledgerRepo) Page(ctx context.Context, walletID string, afterVersion int64, limit int) ([]app.LedgerRow, error) {
 	rows, err := r.q.Query(ctx, `SELECT seq, id::text, wallet_id::text, transaction_id::text, direction, amount_minor, currency,
 		balance_before, balance_after, wallet_version, created_at
-		FROM wallet_ledger_entries WHERE wallet_id = $1 AND seq > $2 ORDER BY seq LIMIT $3`, walletID, afterSeq, limit)
+		FROM wallet_ledger_entries WHERE wallet_id = $1 AND wallet_version > $2 ORDER BY wallet_version LIMIT $3`, walletID, afterVersion, limit)
 	if err != nil {
 		return nil, classify(err)
 	}
@@ -51,9 +55,15 @@ func (r ledgerRepo) Page(ctx context.Context, walletID string, afterSeq int64, l
 			return nil, fmt.Errorf("%w: %w", app.ErrInvariantViolation, err)
 		}
 		p.Direction, p.CreatedAt = wallet.Direction(direction), createdAt
-		p.Amount, _ = money.FromMinor(amount, c)
-		p.BalanceBefore, _ = money.FromMinor(before, c)
-		p.BalanceAfter, _ = money.FromMinor(after, c)
+		if p.Amount, err = money.FromMinor(amount, c); err != nil {
+			return nil, fmt.Errorf("%w: %w", app.ErrInvariantViolation, err)
+		}
+		if p.BalanceBefore, err = money.FromMinor(before, c); err != nil {
+			return nil, fmt.Errorf("%w: %w", app.ErrInvariantViolation, err)
+		}
+		if p.BalanceAfter, err = money.FromMinor(after, c); err != nil {
+			return nil, fmt.Errorf("%w: %w", app.ErrInvariantViolation, err)
+		}
 		if row.Entry, err = wallet.NewLedgerEntry(p); err != nil {
 			return nil, fmt.Errorf("%w: %w", app.ErrInvariantViolation, err)
 		}

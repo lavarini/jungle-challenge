@@ -20,7 +20,9 @@ type Reconciler struct {
 
 func NewReconciler(pool *pgxpool.Pool) *Reconciler { return &Reconciler{pool: pool} }
 
-// Totals reads balance and ledger in one REPEATABLE READ, read-only snapshot.
+// Totals reads the wallet and the ledger from one REPEATABLE READ, read-only
+// snapshot: the arithmetic sum, the chain (last entry's balance_after), the
+// wallet version and the currency of every entry, all against the same view.
 func (r *Reconciler) Totals(ctx context.Context, walletID string) (app.ReconciliationTotals, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
@@ -31,9 +33,9 @@ func (r *Reconciler) Totals(ctx context.Context, walletID string) (app.Reconcili
 		defer cancel()
 		_ = tx.Rollback(rbCtx)
 	}()
-	var balance int64
+	var balance, version int64
 	var currency string
-	err = tx.QueryRow(ctx, `SELECT balance_minor, currency FROM wallets WHERE id = $1`, walletID).Scan(&balance, &currency)
+	err = tx.QueryRow(ctx, `SELECT balance_minor, currency, version FROM wallets WHERE id = $1`, walletID).Scan(&balance, &currency, &version)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return app.ReconciliationTotals{}, app.ErrWalletNotFound
 	}
@@ -42,8 +44,16 @@ func (r *Reconciler) Totals(ctx context.Context, walletID string) (app.Reconcili
 	}
 	var sum string
 	var entries int
-	err = tx.QueryRow(ctx, `SELECT COALESCE(SUM(CASE direction WHEN 'CREDIT' THEN amount_minor::numeric ELSE -amount_minor::numeric END), 0)::text,
-		count(*) FROM wallet_ledger_entries WHERE wallet_id = $1`, walletID).Scan(&sum, &entries)
+	var maxVersion, lastBalanceAfter int64
+	var currencyMismatches int
+	err = tx.QueryRow(ctx, `SELECT
+			COALESCE(SUM(CASE direction WHEN 'CREDIT' THEN amount_minor::numeric ELSE -amount_minor::numeric END), 0)::text,
+			count(*),
+			COALESCE(max(wallet_version), 0),
+			COALESCE((SELECT balance_after FROM wallet_ledger_entries WHERE wallet_id = $1 ORDER BY wallet_version DESC LIMIT 1), 0),
+			count(*) FILTER (WHERE currency <> $2)
+		FROM wallet_ledger_entries WHERE wallet_id = $1`, walletID, currency).
+		Scan(&sum, &entries, &maxVersion, &lastBalanceAfter, &currencyMismatches)
 	if err != nil {
 		return app.ReconciliationTotals{}, classify(err)
 	}
@@ -59,5 +69,16 @@ func (r *Reconciler) Totals(ctx context.Context, walletID string) (app.Reconcili
 	if err != nil {
 		return app.ReconciliationTotals{}, fmt.Errorf("%w: %w", app.ErrInvariantViolation, err)
 	}
-	return app.ReconciliationTotals{Stored: stored, CreditsMinusDebits: calculated, Entries: entries}, nil
+	// LastBalanceAfter is compared to Stored (same currency c) purely to
+	// detect a chain break; a currency-per-entry mismatch is reported
+	// separately via CurrencyMismatches.
+	lastAfter, err := money.FromMinor(lastBalanceAfter, c)
+	if err != nil {
+		return app.ReconciliationTotals{}, fmt.Errorf("%w: %w", app.ErrInvariantViolation, err)
+	}
+	return app.ReconciliationTotals{
+		Stored: stored, CreditsMinusDebits: calculated, Entries: entries,
+		WalletVersion: version, MaxLedgerVersion: maxVersion, LastBalanceAfter: lastAfter,
+		CurrencyMismatches: currencyMismatches,
+	}, nil
 }

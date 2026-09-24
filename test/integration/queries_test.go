@@ -5,7 +5,10 @@ package integration
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -86,5 +89,63 @@ func TestReconciliationMatchesTheLedger(t *testing.T) {
 	if !got.Consistent || got.Stored.String() != "975.00" || got.Calculated.String() != "975.00" ||
 		!got.Difference.IsZero() || got.CheckedEntries != 2 {
 		t.Fatalf("reconciliation %+v", got)
+	}
+}
+
+// TestReconciliationIsConsistentUnderConcurrentBets checks that the
+// REPEATABLE READ, read-only snapshot never observes a torn state (balance
+// updated but ledger entry not yet visible, or vice versa) while bets keep
+// landing on the same wallet. Failures are collected on a channel: t.Fatal
+// must run only on the test goroutine.
+func TestReconciliationIsConsistentUnderConcurrentBets(t *testing.T) {
+	s := newStack(t)
+	r := app.NewReconcile(postgres.NewReconciler(s.pool), quietLog)
+	w := openWallet(t, s, "1000.00")
+
+	const n = 10
+	cmds := make([]app.SubmitCommand, n)
+	for i := range cmds {
+		cmds[i] = command(t, w, wagering.Bet, "1.00", uuid.NewString())
+	}
+
+	errs := make(chan error, n+64)
+	var wg sync.WaitGroup
+	for i := range cmds {
+		wg.Add(1)
+		go func(c app.SubmitCommand) {
+			defer wg.Done()
+			if _, err := s.submit.Execute(context.Background(), c); err != nil {
+				errs <- err
+			}
+		}(cmds[i])
+	}
+
+	stop := make(chan struct{})
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			got, err := r.Execute(context.Background(), w.ID)
+			if err != nil {
+				errs <- err
+			} else if !got.Consistent {
+				errs <- fmt.Errorf("inconsistent reconciliation: %+v", got)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	wg.Wait()
+	close(stop)
+	<-watchDone
+	close(errs)
+
+	for err := range errs {
+		t.Error(err)
 	}
 }

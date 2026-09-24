@@ -68,6 +68,11 @@ func providerScope(p app.Principal) string {
 	return p.ProviderID
 }
 
+// maxExternalTransactionIDLength matches maxFieldLength in
+// internal/app/command.go; the field cannot be imported (unexported), so the
+// bound is kept in sync by hand.
+const maxExternalTransactionIDLength = 255
+
 func (a *api) getTransaction(w http.ResponseWriter, r *http.Request) {
 	id, err := wire.ParseUUID("transactionId", r.PathValue("transactionId"))
 	if err != nil {
@@ -83,13 +88,18 @@ func (a *api) getTransaction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *api) getByExternalID(w http.ResponseWriter, r *http.Request) {
+	externalID := r.PathValue("externalTransactionId")
+	if len(externalID) > maxExternalTransactionIDLength {
+		a.writeError(w, r, fmt.Errorf("%w: externalTransactionId exceeds %d characters", app.ErrInvalidInput, maxExternalTransactionIDLength))
+		return
+	}
 	p := principalFrom(r.Context())
 	providerID := r.PathValue("providerId")
 	if scope := providerScope(p); scope != "" && scope != providerID {
 		writeProblem(w, http.StatusForbidden, "PROVIDER_MISMATCH", "path provider does not match the authenticated provider", false, "")
 		return
 	}
-	t, err := a.transactions.ByExternalID(r.Context(), providerID, r.PathValue("externalTransactionId"))
+	t, err := a.transactions.ByExternalID(r.Context(), providerID, externalID)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -119,7 +129,9 @@ func (a *api) listLedger(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	limit := 0
+	// An absent limit defaults; an explicit one, including 0, is passed
+	// through as-is and validated by the use case like any other value.
+	limit := app.DefaultLedgerLimit
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		if limit, err = strconv.Atoi(raw); err != nil {
 			a.writeError(w, r, fmt.Errorf("%w: limit must be an integer", app.ErrInvalidInput))
@@ -143,12 +155,15 @@ func (a *api) listLedger(w http.ResponseWriter, r *http.Request) {
 }
 
 type reconciliationResponse struct {
-	WalletID          string      `json:"walletId"`
-	StoredBalance     money.Money `json:"storedBalance"`
-	CalculatedBalance money.Money `json:"calculatedBalance"`
-	Difference        money.Money `json:"difference"`
-	Consistent        bool        `json:"consistent"`
-	CheckedEntries    int         `json:"checkedEntries"`
+	WalletID           string      `json:"walletId"`
+	StoredBalance      money.Money `json:"storedBalance"`
+	CalculatedBalance  money.Money `json:"calculatedBalance"`
+	Difference         money.Money `json:"difference"`
+	Consistent         bool        `json:"consistent"`
+	CheckedEntries     int         `json:"checkedEntries"`
+	VersionMismatch    bool        `json:"versionMismatch"`
+	ChainMismatch      bool        `json:"chainMismatch"`
+	CurrencyMismatches int         `json:"currencyMismatches"`
 }
 
 func (a *api) reconcile(w http.ResponseWriter, r *http.Request) {
@@ -165,5 +180,6 @@ func (a *api) reconcile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, reconciliationResponse{
 		WalletID: res.WalletID, StoredBalance: res.Stored, CalculatedBalance: res.Calculated,
 		Difference: res.Difference, Consistent: res.Consistent, CheckedEntries: res.CheckedEntries,
+		VersionMismatch: res.VersionMismatch, ChainMismatch: res.ChainMismatch, CurrencyMismatches: res.CurrencyMismatches,
 	})
 }
