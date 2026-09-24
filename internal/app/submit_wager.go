@@ -154,6 +154,16 @@ func (s *SubmitWager) existing(ctx context.Context, tx Tx, cmd SubmitCommand, ha
 		return SubmitResult{}, false, err
 	}
 	if byExternal != nil {
+		// Under READ COMMITTED, each lookup above takes its own snapshot: a
+		// concurrent twin using the same key can commit between them, so the
+		// key lookup above misses it while this one finds it. Judge the
+		// mismatch by the row's own key, not by which query surfaced it.
+		if byExternal.Provider().IdempotencyKey == cmd.IdempotencyKey {
+			if !bytes.Equal(byExternal.Provider().PayloadHash, hash) {
+				return SubmitResult{}, false, ErrIdempotencyPayloadMismatch
+			}
+			return resultOf(byExternal, true), true, nil
+		}
 		return SubmitResult{}, false, &KeyMismatchError{ExistingTransactionID: byExternal.ID()}
 	}
 	return SubmitResult{}, false, nil
