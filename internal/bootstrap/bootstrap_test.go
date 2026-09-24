@@ -1,0 +1,20 @@
+package bootstrap
+
+import (
+	"testing"
+
+	"go.uber.org/fx"
+
+	"github.com/lavarini/backend-challenge-go/internal/platform/config"
+)
+
+// ValidateApp checks the graph without running constructors, for every role
+// available on day 1.
+func TestGraphIsValidForEveryRole(t *testing.T) {
+	for _, role := range []config.Role{config.RoleAPI, config.RoleAll} {
+		cfg := config.Config{Role: role}
+		if err := fx.ValidateApp(Options(cfg)); err != nil {
+			t.Errorf("role %s: %v", role, err)
+		}
+	}
+}
