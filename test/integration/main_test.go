@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lavarini/backend-challenge-go/internal/adapters/postgres"
 	"github.com/lavarini/backend-challenge-go/test/testenv"
 )
 
@@ -23,6 +24,11 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	env = started
+	if err := postgres.Migrate(env.Postgres.MigratorDSN, "up"); err != nil {
+		fmt.Fprintln(os.Stderr, "migrate:", err)
+		env.Terminate(context.Background())
+		os.Exit(1)
+	}
 	code := m.Run()
 	env.Terminate(context.Background())
 	os.Exit(code)
