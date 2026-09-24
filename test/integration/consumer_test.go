@@ -5,6 +5,8 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,18 +25,66 @@ type queues struct {
 	in, dlq string
 }
 
+// consumerQueues creates a fresh FIFO queue and DLQ for this test, with the
+// same attributes as the real ones. A shared queue let an abandoned long poll
+// from a previous test receive the next test's message, which then stayed
+// invisible for the full VisibilityTimeout; per-test queues remove that.
 func consumerQueues(t *testing.T) queues {
 	t.Helper()
 	ctx := context.Background()
-	in, err := env.LocalStack.QueueURL(ctx, "wager-transactions.fifo")
+	client, err := env.LocalStack.SQS(ctx, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	dlq, err := env.LocalStack.QueueURL(ctx, "wager-transactions-dlq.fifo")
+	suffix := uuid.NewString()[:8]
+
+	dlqOut, err := client.CreateQueue(ctx, &sqs.CreateQueueInput{
+		QueueName:  aws.String("wager-dlq-" + suffix + ".fifo"),
+		Attributes: map[string]string{"FifoQueue": "true", "ContentBasedDeduplication": "false"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return queues{in: in, dlq: dlq}
+	dlqAttrs, err := client.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+		QueueUrl: dlqOut.QueueUrl, AttributeNames: []types.QueueAttributeName{types.QueueAttributeNameQueueArn},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	redrive, _ := json.Marshal(map[string]string{
+		"deadLetterTargetArn": dlqAttrs.Attributes["QueueArn"], "maxReceiveCount": "20",
+	})
+	inOut, err := client.CreateQueue(ctx, &sqs.CreateQueueInput{
+		QueueName: aws.String("wager-in-" + suffix + ".fifo"),
+		Attributes: map[string]string{
+			"FifoQueue": "true", "ContentBasedDeduplication": "false",
+			"VisibilityTimeout": "30", "ReceiveMessageWaitTimeSeconds": "20",
+			"RedrivePolicy": string(redrive),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = client.DeleteQueue(ctx, &sqs.DeleteQueueInput{QueueUrl: inOut.QueueUrl})
+		_, _ = client.DeleteQueue(ctx, &sqs.DeleteQueueInput{QueueUrl: dlqOut.QueueUrl})
+	})
+	return queues{in: aws.ToString(inOut.QueueUrl), dlq: aws.ToString(dlqOut.QueueUrl)}
+}
+
+// tLogWriter routes consumer log lines through t.Log, so a failing test shows
+// what the consumer actually did instead of nothing.
+type tLogWriter struct{ t *testing.T }
+
+func (w tLogWriter) Write(p []byte) (int, error) {
+	w.t.Log(strings.TrimRight(string(p), "\n"))
+	return len(p), nil
+}
+
+func testLogger(t *testing.T) *slog.Logger {
+	return slog.New(slog.NewTextHandler(tLogWriter{t}, nil))
 }
 
 // startConsumer runs a real consumer until the test ends.
@@ -45,9 +95,9 @@ func startConsumer(t *testing.T, s stack, q queues) {
 		t.Fatal(err)
 	}
 	c := sqsin.New(client, s.submit, sqsin.Config{
-		QueueURL: q.in, DLQURL: q.dlq, Senders: map[string]string{"111111111111": "provider-a"},
-		MaxMessages: 10, WaitSeconds: 1, MaxVisibility: 2 * time.Second,
-	}, quietLog)
+		QueueURL: q.in, DLQURL: q.dlq, Senders: map[string]string{"111111111111": "provider-a", "333333333333": "provider-b"},
+		MaxMessages: 10, WaitSeconds: 1, MaxVisibility: 2 * time.Second, MaxReceives: 5,
+	}, testLogger(t))
 	r := runner.Start(c.Loop)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -56,8 +106,8 @@ func startConsumer(t *testing.T, s stack, q queues) {
 	})
 }
 
-func produce(t *testing.T, accessKey, queueURL string, c app.SubmitCommand, messageID string) string {
-	t.Helper()
+// envelope builds the WagerTransactionRequested body for c under messageID.
+func envelope(c app.SubmitCommand, messageID string) string {
 	body, _ := json.Marshal(map[string]any{
 		"messageId": messageID, "type": "WagerTransactionRequested", "occurredAt": time.Now().UTC().Format(time.RFC3339Nano),
 		"data": map[string]any{
@@ -66,18 +116,32 @@ func produce(t *testing.T, accessKey, queueURL string, c app.SubmitCommand, mess
 			"money": map[string]string{"amount": c.Money.String(), "currency": string(c.Money.Currency())},
 		},
 	})
+	return string(body)
+}
+
+// send publishes body to queueURL under group, with a fresh dedup id: SQS
+// treats it as a new delivery even when the body (and hence the envelope's
+// messageId) is unchanged.
+func send(t *testing.T, accessKey, queueURL, group, body string) {
+	t.Helper()
 	client, err := env.LocalStack.SQS(context.Background(), accessKey)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, err = client.SendMessage(context.Background(), &sqs.SendMessageInput{
-		QueueUrl: aws.String(queueURL), MessageBody: aws.String(string(body)),
-		MessageGroupId: aws.String(c.WalletID), MessageDeduplicationId: aws.String(uuid.NewString()),
+		QueueUrl: aws.String(queueURL), MessageBody: aws.String(body),
+		MessageGroupId: aws.String(group), MessageDeduplicationId: aws.String(uuid.NewString()),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return string(body)
+}
+
+func produce(t *testing.T, accessKey, queueURL string, c app.SubmitCommand, messageID string) string {
+	t.Helper()
+	body := envelope(c, messageID)
+	send(t, accessKey, queueURL, c.WalletID, body)
+	return body
 }
 
 func waitFor(t *testing.T, within time.Duration, cond func() bool) {
@@ -120,15 +184,48 @@ func TestConsumerAppliesAMessageOnceEvenWhenRedelivered(t *testing.T) {
 	w := openWallet(t, s, "100.00")
 	c := command(t, w, wagering.Bet, "10.00", uuid.NewString())
 	msg := uuid.NewString()
+	body := envelope(c, msg)
 
-	produce(t, "111111111111", q.in, c, msg)
-	produce(t, "111111111111", q.in, c, msg) // same envelope messageId, new SQS dedup id: a redelivery
+	send(t, "111111111111", q.in, c.WalletID, body)
+	send(t, "111111111111", q.in, c.WalletID, body) // same body, new SQS dedup id: a real redelivery
 	waitFor(t, 15*time.Second, func() bool {
 		return count(t, s.pool, `SELECT count(*) FROM inbox_messages WHERE message_id = $1`, msg) == 1 && balanceOf(t, s, w.ID) == "90.00"
 	})
 	time.Sleep(2 * time.Second)
 	if got := balanceOf(t, s, w.ID); got != "90.00" {
 		t.Fatalf("balance %s after redelivery", got)
+	}
+	if dl := deadLetters(t, q.dlq); dl[w.ID] != "" {
+		t.Fatalf("a genuine redelivery must not be dead-lettered: %v", dl)
+	}
+}
+
+func TestConsumerDeadLettersAReusedMessageIdWithADifferentBody(t *testing.T) {
+	s := newStack(t)
+	q := consumerQueues(t)
+	startConsumer(t, s, q)
+	w := openWallet(t, s, "100.00")
+	c := command(t, w, wagering.Bet, "10.00", uuid.NewString())
+	msg := uuid.NewString()
+	produce(t, "111111111111", q.in, c, msg)
+	waitFor(t, 15*time.Second, func() bool {
+		return count(t, s.pool, `SELECT count(*) FROM inbox_messages WHERE message_id = $1`, msg) == 1
+	})
+
+	changed := c
+	changed.Money = mustBRL(t, "20.00") // same messageId, different body: a reused id, not a redelivery
+	send(t, "111111111111", q.in, c.WalletID, envelope(changed, msg))
+
+	var got map[string]string
+	waitFor(t, 15*time.Second, func() bool {
+		got = deadLetters(t, q.dlq)
+		return got[w.ID] != ""
+	})
+	if got[w.ID] != "INBOX_PAYLOAD_MISMATCH" {
+		t.Fatalf("dead letters %v", got)
+	}
+	if b := balanceOf(t, s, w.ID); b != "90.00" {
+		t.Fatalf("balance changed by a mismatched reused messageId: %s", b)
 	}
 }
 
@@ -154,17 +251,19 @@ func TestHTTPThenSQSForTheSameOperationDebitsOnce(t *testing.T) {
 func TestConsumerDeadLettersUnauthorizedAndInvalidMessages(t *testing.T) {
 	s := newStack(t)
 	q := consumerQueues(t)
-	deadLetters(t, q.dlq) // start from an empty DLQ
 	startConsumer(t, s, q)
 	w1 := openWallet(t, s, "100.00")
 	w2 := openWallet(t, s, "100.00")
+	w3 := openWallet(t, s, "100.00")
 
-	// provider-b's credential claiming provider-a.
+	// Sender not bound to any provider.
 	produce(t, "222222222222", q.in, command(t, w1, wagering.Bet, "10.00", uuid.NewString()), uuid.NewString())
 	// Wallet that does not exist: corrigible, never retried.
 	missing := command(t, w2, wagering.Bet, "10.00", uuid.NewString())
 	missing.WalletID = uuid.NewString()
 	produce(t, "111111111111", q.in, missing, uuid.NewString())
+	// Sender bound to provider-b, envelope claims provider-a.
+	produce(t, "333333333333", q.in, command(t, w3, wagering.Bet, "10.00", uuid.NewString()), uuid.NewString())
 
 	var got map[string]string
 	waitFor(t, 20*time.Second, func() bool {
@@ -174,12 +273,15 @@ func TestConsumerDeadLettersUnauthorizedAndInvalidMessages(t *testing.T) {
 			}
 			got[k] = v
 		}
-		return len(got) >= 2
+		return len(got) >= 3
 	})
-	if got[w1.ID] != "PROVIDER_NOT_AUTHORIZED" || got[missing.WalletID] != "WALLET_NOT_FOUND" {
+	if got[w1.ID] != "PROVIDER_NOT_AUTHORIZED" || got[missing.WalletID] != "WALLET_NOT_FOUND" || got[w3.ID] != "PROVIDER_NOT_AUTHORIZED" {
 		t.Fatalf("dead letters %v", got)
 	}
 	if b := balanceOf(t, s, w1.ID); b != "100.00" {
 		t.Fatalf("unauthorized message moved money: %s", b)
+	}
+	if b := balanceOf(t, s, w3.ID); b != "100.00" {
+		t.Fatalf("mismatched-provider message moved money: %s", b)
 	}
 }

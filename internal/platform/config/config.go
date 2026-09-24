@@ -37,14 +37,19 @@ type OIDCConfig struct {
 // AWSConfig carries only what the SDK does not read by itself. Credentials and
 // AWS_ENDPOINT_URL come from the SDK's standard environment variables.
 type AWSConfig struct {
-	Region         string
-	WagerQueueURL  string
-	DLQURL         string
-	Senders        map[string]string // SenderId -> providerId (ADR 0016)
+	Region        string
+	WagerQueueURL string
+	DLQURL        string
+	Senders       map[string]string // SenderId -> providerId (ADR 0016)
+	// MaxReceives caps the consumer's own retries before it dead-letters a
+	// transient failure as RETRIES_EXHAUSTED, ahead of the queue's native
+	// redrive (ADR 0013).
+	MaxReceives    int32
 	EventsTopicARN string
 }
 
-// ParseSenders reads "senderId=providerId,senderId=providerId".
+// ParseSenders reads "senderId=providerId,senderId=providerId". A sender
+// listed twice is rejected: it would silently keep only the last binding.
 func ParseSenders(s string) (map[string]string, error) {
 	out := map[string]string{}
 	if s == "" {
@@ -54,6 +59,9 @@ func ParseSenders(s string) (map[string]string, error) {
 		sender, provider, ok := strings.Cut(strings.TrimSpace(pair), "=")
 		if !ok || sender == "" || provider == "" {
 			return nil, fmt.Errorf("SQS_SENDER_PROVIDERS: invalid pair %q", pair)
+		}
+		if _, dup := out[sender]; dup {
+			return nil, fmt.Errorf("SQS_SENDER_PROVIDERS: sender %q listed twice", sender)
 		}
 		out[sender] = provider
 	}
@@ -157,6 +165,11 @@ func Load(getenv func(string) string) (Config, error) {
 		errs = append(errs, err)
 	}
 	c.AWS.Senders = senders
+	maxReceives, err := strconv.ParseInt(str("SQS_MAX_RECEIVES", "5"), 10, 32)
+	if err != nil || maxReceives < 1 {
+		errs = append(errs, errors.New("SQS_MAX_RECEIVES must be a positive integer"))
+	}
+	c.AWS.MaxReceives = int32(maxReceives)
 	if c.Role.Runs(RoleConsumer) && (c.AWS.DLQURL == "" || len(c.AWS.Senders) == 0) {
 		errs = append(errs, errors.New("the consumer role requires SQS_WAGER_DLQ_URL and SQS_SENDER_PROVIDERS"))
 	}

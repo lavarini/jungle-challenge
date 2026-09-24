@@ -38,7 +38,7 @@ var consumerModule = fx.Module("consumer",
 func runConsumer(lc fx.Lifecycle, cfg config.Config, client *sqs.Client, submit *app.SubmitWager, l *slog.Logger) {
 	c := sqsin.New(client, submit, sqsin.Config{
 		QueueURL: cfg.AWS.WagerQueueURL, DLQURL: cfg.AWS.DLQURL, Senders: cfg.AWS.Senders,
-		MaxMessages: 10, WaitSeconds: 20, MaxVisibility: 60 * time.Second,
+		MaxMessages: 10, WaitSeconds: 20, MaxVisibility: 60 * time.Second, MaxReceives: cfg.AWS.MaxReceives,
 	}, l)
 	runLoop(lc, c.Loop)
 }

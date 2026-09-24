@@ -14,7 +14,7 @@ cat > /tmp/wager-transactions-attributes.json <<EOF
   "ContentBasedDeduplication": "false",
   "VisibilityTimeout": "30",
   "ReceiveMessageWaitTimeSeconds": "20",
-  "RedrivePolicy": "{\"deadLetterTargetArn\":\"${DLQ_ARN}\",\"maxReceiveCount\":\"5\"}"
+  "RedrivePolicy": "{\"deadLetterTargetArn\":\"${DLQ_ARN}\",\"maxReceiveCount\":\"20\"}"
 }
 EOF
 awslocal sqs create-queue --queue-name wager-transactions.fifo \

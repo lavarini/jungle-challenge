@@ -35,6 +35,10 @@ type Config struct {
 	MaxMessages   int32
 	WaitSeconds   int32
 	MaxVisibility time.Duration
+	// MaxReceives caps how many times the consumer retries a transient
+	// failure before dead-lettering the message itself, well before the
+	// queue's native redrive (ADR 0013).
+	MaxReceives int32
 }
 
 type Consumer struct {
@@ -130,6 +134,14 @@ func (c *Consumer) handle(ctx context.Context, m types.Message) bool {
 	if code, permanent := permanentCode(err); permanent {
 		return c.deadLetter(m, env.MessageID, code, err)
 	}
+	// A transient failure that has already exhausted the consumer's own
+	// retry budget is dead-lettered explicitly, with the last error as the
+	// reason, instead of relying on the queue's native redrive (which has no
+	// reason and, at a low threshold, would also catch messages released
+	// behind a failing group head that never actually failed themselves).
+	if receiveCount(m) >= c.cfg.MaxReceives {
+		return c.deadLetter(m, env.MessageID, "RETRIES_EXHAUSTED", err)
+	}
 	log.WarnContext(ctx, "message will be retried", "error", err.Error(), "class", "transient")
 	c.retryLater(m)
 	return false
@@ -158,6 +170,10 @@ func permanentCode(err error) (string, bool) {
 
 // deadLetter copies the message to the DLQ with its reason, then removes it
 // from the input queue. If the copy fails, the message is retried instead.
+// The dedup id is the SQS message's own MessageId, not the envelope's
+// messageId: the latter is chosen by the producer, so a second legitimate
+// dead letter carrying the same envelope messageId would otherwise be
+// silently dropped by SQS within the FIFO dedup window.
 func (c *Consumer) deadLetter(m types.Message, messageID, code string, cause error) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -165,10 +181,7 @@ func (c *Consumer) deadLetter(m types.Message, messageID, code string, cause err
 	if group == "" {
 		group = "unknown"
 	}
-	dedup := messageID
-	if dedup == "" {
-		dedup = aws.ToString(m.MessageId)
-	}
+	dedup := aws.ToString(m.MessageId)
 	reason := cause.Error()
 	if len(reason) > 256 {
 		reason = reason[:256]
@@ -201,11 +214,17 @@ func (c *Consumer) delete(m types.Message) {
 	}
 }
 
+// receiveCount reads ApproximateReceiveCount; unset or unparsable counts as 0.
+func receiveCount(m types.Message) int32 {
+	n, _ := strconv.Atoi(m.Attributes[string(types.MessageSystemAttributeNameApproximateReceiveCount)])
+	return int32(n)
+}
+
 // retryLater hides the message for min(2^receiveCount s, MaxVisibility).
 func (c *Consumer) retryLater(m types.Message) {
-	n, _ := strconv.Atoi(m.Attributes[string(types.MessageSystemAttributeNameApproximateReceiveCount)])
+	n := receiveCount(m)
 	delay := time.Second
-	for i := 0; i < n && delay < c.cfg.MaxVisibility; i++ {
+	for i := int32(0); i < n && delay < c.cfg.MaxVisibility; i++ {
 		delay *= 2
 	}
 	if delay > c.cfg.MaxVisibility {

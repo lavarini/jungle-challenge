@@ -47,9 +47,10 @@ func TestLoadReportsEveryMissingVariable(t *testing.T) {
 
 func TestLoadRejectsInvalidValues(t *testing.T) {
 	cases := map[string]string{
-		"WAGERD_ROLE":     "everything",
-		"DB_LOCK_TIMEOUT": "soon",
-		"DB_MAX_CONNS":    "-1",
+		"WAGERD_ROLE":      "everything",
+		"DB_LOCK_TIMEOUT":  "soon",
+		"DB_MAX_CONNS":     "-1",
+		"SQS_MAX_RECEIVES": "0",
 	}
 	for k, v := range cases {
 		if _, err := Load(env(map[string]string{k: v})); err == nil {
@@ -79,6 +80,9 @@ func TestParseSenders(t *testing.T) {
 	}
 	if _, err := ParseSenders("broken"); err == nil {
 		t.Fatal("pair without '=' accepted")
+	}
+	if _, err := ParseSenders("111111111111=provider-a,111111111111=provider-b"); err == nil {
+		t.Fatal("sender listed twice accepted")
 	}
 	if _, err := Load(env(map[string]string{"WAGERD_ROLE": "consumer", "SQS_SENDER_PROVIDERS": ""})); err == nil {
 		t.Fatal("consumer without senders accepted")

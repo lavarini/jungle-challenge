@@ -89,8 +89,8 @@ func bodyWith(messageID, externalID string) string {
 
 func newTestConsumer(f *fakeSQS, s *fakeSubmitter) *Consumer {
 	return New(f, s, Config{
-		QueueURL: "in", DLQURL: "dlq", Senders: map[string]string{"111111111111": "provider-a"},
-		MaxMessages: 10, WaitSeconds: 0, MaxVisibility: time.Minute,
+		QueueURL: "in", DLQURL: "dlq", Senders: map[string]string{"111111111111": "provider-a", "333333333333": "provider-b"},
+		MaxMessages: 10, WaitSeconds: 0, MaxVisibility: time.Minute, MaxReceives: 5,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
@@ -178,8 +178,54 @@ func TestVisibilityBackoffIsCapped(t *testing.T) {
 	f := &fakeSQS{visibility: map[string]int32{}}
 	s := &fakeSubmitter{errFor: map[string]error{"e1": errors.New("connection reset")}}
 	f.batch = []types.Message{message("h1", "w1", "111111111111", "20", bodyWith("m1", "e1"))}
-	poll(t, newTestConsumer(f, s))
+	// A high MaxReceives isolates the visibility cap from the retries-exhausted
+	// gate: both act on the same ApproximateReceiveCount, but they are distinct
+	// mechanisms.
+	c := New(f, s, Config{
+		QueueURL: "in", DLQURL: "dlq", Senders: map[string]string{"111111111111": "provider-a"},
+		MaxMessages: 10, WaitSeconds: 0, MaxVisibility: time.Minute, MaxReceives: 100,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	poll(t, c)
 	if f.visibility["h1"] != 60 {
 		t.Fatalf("visibility %d, want cap 60", f.visibility["h1"])
+	}
+}
+
+func TestTransientFailureAtMaxReceivesGoesToDLQAsRetriesExhausted(t *testing.T) {
+	f := &fakeSQS{visibility: map[string]int32{}}
+	s := &fakeSubmitter{errFor: map[string]error{"e1": app.ErrTransient}}
+	f.batch = []types.Message{message("h1", "w1", "111111111111", "5", bodyWith("m1", "e1"))}
+	poll(t, newTestConsumer(f, s))
+	if len(f.dlq) != 1 || aws.ToString(f.dlq[0].MessageAttributes["failureCode"].StringValue) != "RETRIES_EXHAUSTED" {
+		t.Fatalf("dlq %+v", f.dlq)
+	}
+	if aws.ToString(f.dlq[0].MessageAttributes["reason"].StringValue) == "" {
+		t.Fatal("dead letter without reason")
+	}
+	if len(f.deleted) != 1 || f.deleted[0] != "h1" {
+		t.Fatalf("dead-lettered message must leave the input queue: deleted %v", f.deleted)
+	}
+	if _, changed := f.visibility["h1"]; changed {
+		t.Fatal("a message exhausted by retries must not also be retried via visibility")
+	}
+}
+
+func TestSenderBoundToAnotherProviderIsRejected(t *testing.T) {
+	f := &fakeSQS{visibility: map[string]int32{}}
+	s := &fakeSubmitter{}
+	// 333333333333 is bound to provider-b; the envelope claims provider-a.
+	f.batch = []types.Message{message("h1", "w1", "333333333333", "1", bodyWith("m1", "e1"))}
+	poll(t, newTestConsumer(f, s))
+	if len(f.dlq) != 1 || aws.ToString(f.dlq[0].MessageAttributes["failureCode"].StringValue) != "PROVIDER_NOT_AUTHORIZED" {
+		t.Fatalf("dlq %+v", f.dlq)
+	}
+	if got := aws.ToString(f.dlq[0].MessageDeduplicationId); got != "sqs-h1" {
+		t.Fatalf("dedup id = %q, want the SQS MessageId", got)
+	}
+	if len(s.calls) != 0 {
+		t.Fatal("mismatched provider reached the use case")
+	}
+	if len(f.deleted) != 1 || f.deleted[0] != "h1" {
+		t.Fatalf("dead-lettered message must leave the input queue: deleted %v", f.deleted)
 	}
 }
