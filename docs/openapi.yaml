@@ -1,0 +1,335 @@
+openapi: 3.1.0
+info:
+  title: Wagering API
+  version: "1.0"
+  description: |
+    Processamento de apostas com carteira em PostgreSQL. Dinheiro sempre como string decimal
+    canônica com duas casas (`^(0|[1-9][0-9]*)\.[0-9]{2}$`) e moeda ISO 4217; nunca número.
+    Erros seguem RFC 9457 (`application/problem+json`) com `code` estável e `retryable`.
+    Tokens: OIDC do Keycloak, RS256. Papel `provider` (com claim `provider_id`) ou `internal`.
+servers:
+  - url: http://localhost:8080
+security:
+  - bearer: []
+tags:
+  - name: health
+  - name: wallets
+  - name: wagering
+paths:
+  /health/live:
+    get:
+      tags: [health]
+      security: []
+      summary: Processo vivo
+      responses:
+        "200": { description: vivo }
+  /health/ready:
+    get:
+      tags: [health]
+      security: []
+      summary: Pronto para tráfego (PostgreSQL e SQS); 503 durante o encerramento
+      responses:
+        "200": { description: pronto }
+        "503": { description: dependência indisponível ou processo drenando }
+  /wallets:
+    post:
+      tags: [wallets]
+      summary: Abre carteira (papel internal)
+      description: Uma carteira por jogador e moeda. Saldo inicial positivo gera a operação interna OPENING com ledger e eventos.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [playerId, initialBalance]
+              properties:
+                playerId: { $ref: "#/components/schemas/Uuid" }
+                initialBalance: { $ref: "#/components/schemas/Money" }
+      responses:
+        "201":
+          description: criada
+          content: { application/json: { schema: { $ref: "#/components/schemas/Wallet" } } }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+  /wallets/{walletId}:
+    get:
+      tags: [wallets]
+      summary: Lê carteira (papel internal)
+      parameters: [{ $ref: "#/components/parameters/WalletId" }]
+      responses:
+        "200":
+          description: carteira
+          content: { application/json: { schema: { $ref: "#/components/schemas/Wallet" } } }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+  /wallets/{walletId}/ledger:
+    get:
+      tags: [wallets]
+      summary: Ledger paginado por keyset (papel internal)
+      parameters:
+        - { $ref: "#/components/parameters/WalletId" }
+        - name: cursor
+          in: query
+          description: Opaco; devolvido em `nextCursor`.
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        "200":
+          description: página em ordem de walletVersion
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entries]
+                properties:
+                  entries: { type: array, items: { $ref: "#/components/schemas/LedgerEntry" } }
+                  nextCursor: { type: string, description: ausente na última página }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+  /wallets/{walletId}/reconciliation:
+    post:
+      tags: [wallets]
+      summary: Reconcilia saldo com o ledger num snapshot (papel internal)
+      parameters: [{ $ref: "#/components/parameters/WalletId" }]
+      responses:
+        "200":
+          description: resultado; divergência não é erro HTTP
+          content: { application/json: { schema: { $ref: "#/components/schemas/Reconciliation" } } }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+  /wagering/transactions:
+    post:
+      tags: [wagering]
+      summary: Envia operação externa (papel provider)
+      description: |
+        Idempotente por (providerId, Idempotency-Key), independente do canal (HTTP ou SQS).
+        `providerId` do corpo precisa ser o do token. `referenceExternalTransactionId` é obrigatório
+        em REFUND e ROLLBACK, opcional em WIN e proibido em BET e LOSS.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, maxLength: 255 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SubmitRequest" }
+      responses:
+        "201":
+          description: processada agora
+          content: { application/json: { schema: { $ref: "#/components/schemas/SubmitResult" } } }
+        "200":
+          description: replay de operação já processada (`idempotentReplay=true`)
+          content: { application/json: { schema: { $ref: "#/components/schemas/SubmitResult" } } }
+        "202":
+          description: aguardando a referência (`PENDING_REFERENCE`)
+          content: { application/json: { schema: { $ref: "#/components/schemas/SubmitResult" } } }
+        "422":
+          description: rejeição definitiva persistida; o replay devolve a mesma rejeição
+          content: { application/json: { schema: { $ref: "#/components/schemas/SubmitResult" } } }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /wagering/transactions/{transactionId}:
+    get:
+      tags: [wagering]
+      summary: Lê transação (provider só vê as suas; fora do escopo responde 404)
+      parameters:
+        - name: transactionId
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/Uuid" }
+      responses:
+        "200":
+          description: transação
+          content: { application/json: { schema: { $ref: "#/components/schemas/Transaction" } } }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+  /providers/{providerId}/wagering/transactions/{externalTransactionId}:
+    get:
+      tags: [wagering]
+      summary: Lê transação pelo id externo (provider só o próprio providerId)
+      parameters:
+        - name: providerId
+          in: path
+          required: true
+          schema: { type: string }
+        - name: externalTransactionId
+          in: path
+          required: true
+          schema: { type: string, maxLength: 255 }
+      responses:
+        "200":
+          description: transação
+          content: { application/json: { schema: { $ref: "#/components/schemas/Transaction" } } }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    WalletId:
+      name: walletId
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/Uuid" }
+  responses:
+    Problem:
+      description: erro RFC 9457
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+  schemas:
+    Uuid:
+      type: string
+      pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+      description: UUID canônico em minúsculas
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount: { type: string, pattern: "^(0|[1-9][0-9]*)\\.[0-9]{2}$", examples: ["10.00"] }
+        currency: { type: string, pattern: "^[A-Z]{3}$", examples: ["BRL"] }
+    Wallet:
+      type: object
+      required: [id, playerId, balance, version]
+      properties:
+        id: { $ref: "#/components/schemas/Uuid" }
+        playerId: { $ref: "#/components/schemas/Uuid" }
+        balance: { $ref: "#/components/schemas/Money" }
+        version: { type: integer, format: int64 }
+    Kind:
+      type: string
+      enum: [BET, WIN, LOSS, REFUND, ROLLBACK]
+    Status:
+      type: string
+      enum: [PROCESSED, REJECTED, PENDING_REFERENCE, FAILED]
+    FailureCode:
+      type: string
+      description: rejeição definitiva persistida
+      enum:
+        - BET_INSUFFICIENT_FUNDS
+        - REVERSAL_INSUFFICIENT_FUNDS
+        - REVERSAL_ALREADY_APPLIED
+        - REFERENCE_MISMATCH
+        - REFERENCE_NOT_PROCESSED
+        - REFERENCE_NOT_FOUND
+    SubmitRequest:
+      type: object
+      required: [providerId, externalTransactionId, playerId, walletId, roundId, gameId, kind, money]
+      properties:
+        providerId: { type: string }
+        externalTransactionId: { type: string, maxLength: 255 }
+        playerId: { $ref: "#/components/schemas/Uuid" }
+        walletId: { $ref: "#/components/schemas/Uuid" }
+        roundId: { type: string, maxLength: 255 }
+        gameId: { type: string, maxLength: 255 }
+        kind: { $ref: "#/components/schemas/Kind" }
+        money: { $ref: "#/components/schemas/Money" }
+        referenceExternalTransactionId: { type: string, maxLength: 255 }
+    SubmitResult:
+      type: object
+      required: [transactionId, status, idempotentReplay]
+      properties:
+        transactionId: { $ref: "#/components/schemas/Uuid" }
+        status: { $ref: "#/components/schemas/Status" }
+        failureCode: { $ref: "#/components/schemas/FailureCode" }
+        balance: { $ref: "#/components/schemas/Money" }
+        idempotentReplay: { type: boolean }
+    Transaction:
+      type: object
+      required: [transactionId, origin, kind, status, walletId, playerId, money, createdAt]
+      properties:
+        transactionId: { $ref: "#/components/schemas/Uuid" }
+        origin: { type: string, enum: [INTERNAL, EXTERNAL] }
+        kind: { type: string, enum: [OPENING, BET, WIN, LOSS, REFUND, ROLLBACK] }
+        status: { $ref: "#/components/schemas/Status" }
+        walletId: { $ref: "#/components/schemas/Uuid" }
+        playerId: { $ref: "#/components/schemas/Uuid" }
+        providerId: { type: string }
+        externalTransactionId: { type: string }
+        roundId: { type: string }
+        gameId: { type: string }
+        referenceExternalTransactionId: { type: string }
+        money: { $ref: "#/components/schemas/Money" }
+        failureCode: { $ref: "#/components/schemas/FailureCode" }
+        balance: { $ref: "#/components/schemas/Money" }
+        walletVersion: { type: integer, format: int64 }
+        attempts: { type: integer }
+        nextAttemptAt: { type: string, format: date-time }
+        deadlineAt: { type: string, format: date-time }
+        createdAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time }
+    LedgerEntry:
+      type: object
+      required: [id, transactionId, direction, amount, balanceBefore, balanceAfter, walletVersion, createdAt]
+      properties:
+        id: { $ref: "#/components/schemas/Uuid" }
+        transactionId: { $ref: "#/components/schemas/Uuid" }
+        direction: { type: string, enum: [DEBIT, CREDIT] }
+        amount: { $ref: "#/components/schemas/Money" }
+        balanceBefore: { $ref: "#/components/schemas/Money" }
+        balanceAfter: { $ref: "#/components/schemas/Money" }
+        walletVersion: { type: integer, format: int64 }
+        createdAt: { type: string, format: date-time }
+    Reconciliation:
+      type: object
+      required: [walletId, storedBalance, calculatedBalance, difference, consistent, checkedEntries, versionMismatch, chainMismatch, currencyMismatches]
+      properties:
+        walletId: { $ref: "#/components/schemas/Uuid" }
+        storedBalance: { $ref: "#/components/schemas/Money" }
+        calculatedBalance: { $ref: "#/components/schemas/Money" }
+        difference: { $ref: "#/components/schemas/Money", description: armazenado menos calculado }
+        consistent: { type: boolean }
+        checkedEntries: { type: integer }
+        versionMismatch: { type: boolean }
+        chainMismatch: { type: boolean }
+        currencyMismatches: { type: integer }
+    Problem:
+      type: object
+      required: [type, title, status, code, retryable]
+      properties:
+        type: { type: string, examples: ["about:blank"] }
+        title: { type: string }
+        status: { type: integer }
+        code:
+          type: string
+          enum:
+            - INVALID_REQUEST
+            - WALLET_MISMATCH
+            - UNAUTHENTICATED
+            - FORBIDDEN
+            - PROVIDER_MISMATCH
+            - WALLET_NOT_FOUND
+            - TRANSACTION_NOT_FOUND
+            - WALLET_ALREADY_EXISTS
+            - IDEMPOTENCY_KEY_MISMATCH
+            - IDEMPOTENCY_PAYLOAD_MISMATCH
+            - SERVICE_UNAVAILABLE
+            - INVARIANT_VIOLATION
+            - INTERNAL_ERROR
+        detail: { type: string }
+        retryable: { type: boolean, description: "true só em 503; repetir com a mesma Idempotency-Key" }
+        transactionId: { $ref: "#/components/schemas/Uuid", description: "em IDEMPOTENCY_KEY_MISMATCH, a transação já registrada" }
