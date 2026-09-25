@@ -136,6 +136,8 @@ Logs JSON com `correlationId`, `transactionId`, `walletId`, `providerId` e `mess
 payload financeiro completo nem credenciais. As métricas Prometheus e o `pprof` ficam na porta
 administrativa (`ADMIN_ADDR`), que o Compose não publica. Nenhum identificador de alta
 cardinalidade aparece em rótulos. O [RUNBOOK](docs/RUNBOOK.md) diz o que fazer com cada sinal.
+Teste de carga: gerador em `cmd/load` (`make load`), metodologia e resultados em
+[docs/CARGA.md](docs/CARGA.md).
 
 ## Interpretações adotadas
 
@@ -179,8 +181,9 @@ O enunciado deixa decisões em aberto; cada uma virou um ADR:
   vai com o motivo registrado.
 - **Duas pendências que se referenciam** em carteiras diferentes e vencem ao mesmo tempo podem
   gerar deadlock no PostgreSQL. O erro é transitório e a operação é retomada.
-- **Varredura da outbox.** A consulta de cabeças percorre os eventos não publicados. O custo é
-  O(backlog), e LISTEN/NOTIFY é a evolução natural.
+- **Varredura da outbox.** O custo por claim é O(partições com eventos pendentes) — um skip scan
+  sobre o índice parcial, não uma varredura do backlog inteiro — com o array de cabeças
+  materializado a cada tick. Os próximos passos são LISTEN/NOTIFY e um teto de partições por claim.
 - **Requisição ainda não aceita pelo SO no instante do `SIGTERM`.** O teste E2E
   (`TestSIGTERMDrainsAndExitsCleanly`, `test/e2e/crash/crash_test.go`) prova que toda requisição já
   despachada antes do sinal termina com sucesso; uma conexão ainda na fila de aceitação do listener
@@ -195,5 +198,4 @@ O enunciado deixa decisões em aberto; cada uma virou um ADR:
   de verdade.
 - Um processo por papel, cada um com sua própria credencial AWS, não é exercitado no Compose (ver
   `Limitações conhecidas`); só o papel `all` roda ali.
-- Teste de carga (opcional, ver [ADR 0003](docs/adr/0003-execucao-em-fatias-verticais.md)).
 - Tracing com OpenTelemetry e dashboards (diferenciais opcionais do enunciado).

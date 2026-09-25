@@ -20,12 +20,10 @@ docker compose --profile multi down -v
 ```
 
 `make load` roda `go run ./cmd/load $(LOAD_ARGS)`; `go run ./cmd/load -h` lista todas as flags.
-Nesta máquina a porta 5432 do host já estava ocupada por um container de outro projeto, então o
-Postgres do Compose foi remapeado para `127.0.0.1:15432` com um `docker-compose.override.yml`
-local e não versionado (`ports: !override`), e as execuções abaixo usaram
-`-db postgres://wager_app:app-dev-only@127.0.0.1:15432/wagering?sslmode=disable`. O padrão da
-flag `-db` no binário continua apontando para a porta 5432 padrão do Compose, o que um checkout
-limpo usa sem precisar de override.
+As execuções abaixo usaram `-db` apontando para outra porta local
+(`postgres://wager_app:app-dev-only@127.0.0.1:15432/wagering?sslmode=disable`). O padrão da flag
+`-db` no binário continua apontando para a porta 5432 padrão do Compose, o que um checkout limpo
+usa sem precisar de override.
 
 ## Ambiente
 
@@ -36,11 +34,11 @@ limpo usa sem precisar de override.
   Keycloak e LocalStack.
 - Imagens (de `docker-compose.yml`): `postgres:17.6-alpine`, `quay.io/keycloak/keycloak:26.3.3`,
   `localstack/localstack:4.7.0`, `wagerd:local` (build local, `Dockerfile` do repositório).
-- O relay da outbox inclui as três mudanças de `dd8a52b`..`e5d7e9c`: claim por skip scan (não
-  depende mais de estatísticas atualizadas da tabela), publicação paralela das cabeças de um lote
-  (`OUTBOX_PUBLISH_CONCURRENCY=16`, o padrão) e reivindicação imediata de um novo lote quando o
-  anterior não veio vazio. Isso eliminou os erros `57014` (`canceling statement due to statement
-  timeout`) que apareciam na claim sob carga antes dessas mudanças.
+- O relay da outbox inclui as três mudanças descritas em ADR 0014, seção "Revisão": claim por skip
+  scan (não depende mais de estatísticas atualizadas da tabela), publicação paralela das cabeças de
+  um lote (`OUTBOX_PUBLISH_CONCURRENCY=16`, o padrão) e reivindicação imediata de um novo lote
+  quando o anterior não veio vazio. Isso eliminou os erros `57014` (`canceling statement due to
+  statement timeout`) que apareciam na claim sob carga antes dessas mudanças.
 - O gerador de carga (`cmd/load`) rodou na mesma máquina que a stack — ver Limitações.
 
 ## Metodologia
@@ -182,16 +180,16 @@ tempo esperando o `SELECT ... FOR UPDATE` da mesma linha (`internal/app/submit_w
 **não** aparece como conflito de idempotência por contenção de escrita em si: o `409` observado
 (598 e 207 nas duas execuções, ambos próximos dos `~2%` de `-conflict`) vem inteiramente do
 mecanismo dedicado do gerador — reenviar a `Idempotency-Key` de uma operação recente com um valor
-diferente — não de duas requisições novas colidindo por acaso. Sem esse mecanismo (como na v1
-deste gerador, com só `-dup`), o `409` fica em zero mesmo sob 80% de tráfego na carteira quente,
-porque o lock de linha serializa concorrentes em vez de rejeitá-los.
+diferente — não de duas requisições novas colidindo por acaso. Sem esse mecanismo (com só `-dup`),
+o `409` fica em zero mesmo sob 80% de tráfego na carteira quente, porque o lock de linha serializa
+concorrentes em vez de rejeitá-los.
 
 Os 32 erros de transporte de cada execução batem exatamente com `-concurrency`: é a requisição em
 voo de cada worker cancelada quando o contexto de `-duration` expira, não uma falha do serviço
 (nenhum `5xx` em nenhuma execução).
 
 A outbox agora drena completamente dentro da janela de 10 min nas duas execuções — o relay
-corrigido (commits `dd8a52b`..`e5d7e9c`, ver Ambiente e ADR 0014, seção "Revisão") elimina os
+corrigido (ver Ambiente e ADR 0014, seção "Revisão") elimina os
 `57014` e drena o backlog de uma carga de 60 s em poucos minutos. Antes dessas mudanças, sob uma
 carga parecida (`-hot 0.2`, ~500 req/s), a outbox não drenava (~35 mil eventos pendentes ao fim da
 carga) e, com o atraso concentrado na carteira quente, a partição só avançava a cerca de 5,9

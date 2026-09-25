@@ -68,7 +68,7 @@ func parseFlags() flags {
 	dup := flag.Float64("dup", 0.1, "fraction of requests that replay the worker's last operation with the same Idempotency-Key")
 	conflict := flag.Float64("conflict", 0.02, "fraction of requests that reuse another worker's recent Idempotency-Key with a different payload (exercises 409 IDEMPOTENCY_PAYLOAD_MISMATCH)")
 	db := flag.String("db", "postgres://wager_app:app-dev-only@localhost:5432/wagering?sslmode=disable",
-		"DSN used to measure the outbox (wager_app role; falls back to postgres-dev-only if it lacks SELECT)")
+		"DSN used to measure the outbox (wager_app role)")
 	drainTimeout := flag.Duration("drain-timeout", 10*time.Minute, "how long to wait for the outbox to fully drain before measuring delay")
 	flag.Parse()
 

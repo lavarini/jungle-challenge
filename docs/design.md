@@ -440,14 +440,13 @@ exata.
   `go test -json`: requisito do enunciado -> teste -> resultado -> duração, com
   commit e versões.
 
-### Definição de pronto por tarefa
+### Critérios de qualidade
 
 - código, migration, configuração e ADR atualizados quando afetados;
 - teste proporcional à garantia introduzida, na camada em que ela é observável;
 - comando de verificação reproduzível, executado e com saída registrada;
 - nenhum caminho de produção simulado em memória nem infraestrutura inteira
   substituída por mock;
-- review independente aprovado contra a spec;
 - nenhuma sofisticação fora do escopo sem ADR.
 
 ### Comandos
@@ -455,11 +454,10 @@ exata.
 `make test`, `make test-race`, `make vet`, `make lint`, `make test-integration`,
 `make test-e2e`, `make up`, `make up-multi`, `make evidence`.
 
-### Se sobrar tempo
+### Teste de carga
 
-Teste de carga com k6 em container (throughput, p50/p95/p99, erros, conflitos,
-lag da outbox; cenários de carteiras quentes e espalhadas) e perfil `pprof`
-coletado durante a carga, comentado no `ARCHITECTURE.md`.
+Gerador próprio em `cmd/load` (`make load`); metodologia, cenários e
+resultados em [docs/CARGA.md](CARGA.md).
 
 ## 7. Observabilidade
 
@@ -491,7 +489,7 @@ coletado durante a carga, comentado no `ARCHITECTURE.md`.
 
 - **Health:** `/health/live` responde enquanto o processo está vivo;
   `/health/ready` verifica Postgres (`ping`) e SQS (`GetQueueAttributes`) com
-  timeout de 2 s e passa a `503` no início do shutdown, antes de drenar.
+  timeout de 3 s e passa a `503` no início do shutdown, antes de drenar.
 - Tracing OpenTelemetry fora do escopo (ADR 0003).
 
 ## 8. Entregáveis de documentação
