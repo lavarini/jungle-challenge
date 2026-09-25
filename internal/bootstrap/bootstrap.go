@@ -1,5 +1,5 @@
 // Package bootstrap is the only package that imports Fx. It composes the
-// modules selected by the process role (ADR 0002, ADR 0020).
+// modules selected by the process role (ADR 0002, ADR 0019).
 package bootstrap
 
 import (
