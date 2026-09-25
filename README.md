@@ -47,6 +47,9 @@ Migrations: `wagerd migrate up` e `wagerd migrate down`, com `MIGRATE_DATABASE_U
 apontando para a role proprietária `wager_migrator`. O `down` apaga os dados e
 existe só para desenvolvimento. Variáveis em [`.env.example`](.env.example).
 
+`wagerd healthcheck` consulta `/health/ready` na porta administrativa (`ADMIN_ADDR`) e sai com
+`0`/`1`; é o `test` do healthcheck do Compose, já que a imagem distroless não tem `curl`.
+
 ### Identidades locais (Keycloak, `client_credentials`)
 
 | Client | Segredo (só desenvolvimento) | Papel |

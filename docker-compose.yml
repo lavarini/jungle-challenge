@@ -94,6 +94,13 @@ services:
       SNS_EVENTS_TOPIC_ARN: arn:aws:sns:us-east-1:000000000000:wallet-events.fifo
     ports:
       - "127.0.0.1:8080:8080"
+    healthcheck:
+      # Distroless has no shell or curl; the binary probes its own admin port.
+      test: ["CMD", "/wagerd", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]

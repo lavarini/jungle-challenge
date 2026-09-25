@@ -181,9 +181,6 @@ O enunciado deixa decisões em aberto; cada uma virou um ADR:
   gerar deadlock no PostgreSQL. O erro é transitório e a operação é retomada.
 - **Varredura da outbox.** A consulta de cabeças percorre os eventos não publicados. O custo é
   O(backlog), e LISTEN/NOTIFY é a evolução natural.
-- **Healthcheck dos containers da aplicação.** A imagem é distroless e não tem `curl`, então os
-  serviços `wagerd` no Compose não têm healthcheck próprio. A prontidão é verificada pelos testes e
-  pelo smoke.
 - **Requisição ainda não aceita pelo SO no instante do `SIGTERM`.** O teste E2E
   (`TestSIGTERMDrainsAndExitsCleanly`, `test/e2e/crash/crash_test.go`) prova que toda requisição já
   despachada antes do sinal termina com sucesso; uma conexão ainda na fila de aceitação do listener
