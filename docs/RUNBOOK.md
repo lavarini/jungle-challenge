@@ -112,6 +112,9 @@ subindo.
    `WORKER_LEASE` ou investigar `outbox_publish_seconds`.
 4. `outbox_bookkeeping_failures_total` subindo: o relay publica mas não consegue registrar o
    resultado no banco. O evento é republicado com o mesmo `eventId`. Investigar o banco.
+5. Retries zerados, lag crescendo e `outbox_publish_seconds` alto: o SNS é o gargalo. Mais
+   `OUTBOX_PUBLISH_CONCURRENCY` só ajuda enquanto a latência de publicação não sobe junto. Se o
+   atraso está numa carteira só, a vazão dela é serial por desenho (ADR 0014).
 
 ## Diagnóstico com pprof
 

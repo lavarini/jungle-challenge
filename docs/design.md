@@ -302,7 +302,8 @@ Relay ([ADR 0014](adr/0014-relay-da-outbox-por-cabeca-de-particao.md)):
 claim   (tx curta)  só a cabeça não publicada de cada partition_key, com
                     next_attempt_at <= now e sem lease vigente; SKIP LOCKED
                     -> claim_id, claim_expires_at = now + 30 s, attempts++; COMMIT
-publish (sem tx)    SNS Publish, um por evento, limitado ao lease
+publish (sem tx)    SNS Publish, um por evento, limitado ao lease; cabeças de
+                    partições diferentes em paralelo (OUTBOX_PUBLISH_CONCURRENCY)
 ack     (tx curta)  published_at = now WHERE seq = $1 AND claim_id = $2   (fencing)
 falha   (tx curta)  next_attempt_at = now + backoff com jitter (teto 5 min),
                     limpa lease WHERE claim_id = $2
@@ -314,7 +315,7 @@ falha   (tx curta)  next_attempt_at = now + backoff com jitter (teto 5 min),
 - Queda entre publish e ack: republicação com o mesmo `eventId`; assinantes
   deduplicam por `eventId`.
 - Lag: gauge `now - occurred_at` do mais antigo não publicado. Polling de
-  500 ms configurável.
+  500 ms configurável, só quando a reivindicação volta vazia.
 
 ### Eventos
 
