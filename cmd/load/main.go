@@ -157,6 +157,7 @@ func run(cfg flags, out *os.File) error {
 	if err != nil {
 		return fmt.Errorf("outbox drain check: %w", err)
 	}
+	log.Printf("outbox drain check (global, pre-measurement): drained=%v", drainOK)
 	outbox, err := measureOutbox(ctx, pool, loadStart)
 	if err != nil {
 		return fmt.Errorf("outbox measurement: %w", err)
@@ -176,7 +177,7 @@ func run(cfg flags, out *os.File) error {
 	}
 
 	env := environment{numCPU: runtime.NumCPU(), goos: runtime.GOOS, goarch: runtime.GOARCH, cfg: cfg}
-	writeReport(out, env, elapsed, stats, statusCounts, rawStatusCounts, transportErrors, drainOK, outbox, recon)
+	writeReport(out, env, elapsed, stats, statusCounts, rawStatusCounts, transportErrors, outbox, recon)
 
 	if len(recon.inconsistent) > 0 || len(recon.failed) > 0 {
 		return fmt.Errorf("reconciliation found %d divergence(s) and %d failed call(s); see the report above",
@@ -212,7 +213,8 @@ func categorize(status int) string {
 //     submitted by another worker) with a different payload (same key, different hash; 409
 //     IDEMPOTENCY_PAYLOAD_MISMATCH).
 //  3. otherwise: submit a new BET against the hot wallet (probability cfg.hot) or a uniformly
-//     chosen non-hot wallet, and record it in recent for other workers' future conflicts.
+//     chosen non-hot wallet; once the server confirms it with 201, record it in recent so other
+//     workers' future conflicts always target an operation that has already committed.
 func runLoad(cfg flags, providerTok string, wallets []wallet) [][]opResult {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.duration)
 	defer cancel()
@@ -236,6 +238,7 @@ func runLoad(cfg flags, providerTok string, wallets []wallet) [][]opResult {
 
 				var body submitRequest
 				var idemKey string
+				isNew := false
 				switch {
 				case haveLast && rng.Float64() < cfg.dup:
 					body, idemKey = lastBody, lastKey
@@ -261,12 +264,19 @@ func runLoad(cfg flags, providerTok string, wallets []wallet) [][]opResult {
 						Money: money{Amount: betAmount, Currency: currency},
 					}
 					lastBody, lastKey, haveLast = body, idemKey, true
-					recent.add(recentOp{idemKey: idemKey, body: body})
+					isNew = true
 				}
 
 				start := time.Now()
 				status, err := submitBet(ctx, api, providerTok, idemKey, body)
 				local = append(local, opResult{status: status, transportErr: err != nil, latency: time.Since(start)})
+				// Only publish to the shared pool once the server has confirmed this operation was
+				// processed (201): a future -conflict pick must always race against an operation
+				// that has already committed, never one still in flight, or the 409 could land on
+				// either side of the race depending on which request the server saw first.
+				if isNew && status == http.StatusCreated {
+					recent.add(recentOp{idemKey: idemKey, body: body})
+				}
 			}
 			results[id] = local
 		}(id)
@@ -296,15 +306,16 @@ func waitOutboxDrained(ctx context.Context, pool *pgxpool.Pool, timeout time.Dur
 }
 
 // measureOutbox reads, for events that occurred since the load started: how many exist, how many
-// were published, and the p50/p95/p99 publish delay. percentile_cont ignores NULL inputs, so rows
-// still pending (published_at IS NULL) are excluded from the percentiles by construction - the
-// AND published_at IS NOT NULL below is redundant but documents that on purpose. Callers must
-// compare published against total: if they differ, the percentiles are right-censored and the
-// real tail is longer than what they show.
+// were published, how many were dead-lettered, and the p50/p95/p99 publish delay. published and
+// dead are mutually exclusive outcomes (a row's published_at and dead_at are never both set), so
+// total - published - dead is the count still genuinely in flight - the only rows that make the
+// percentiles right-censored. percentile_cont ignores NULL inputs, so rows still pending
+// (published_at IS NULL) are excluded from the percentiles by construction - the
+// AND published_at IS NOT NULL below is redundant but documents that on purpose.
 func measureOutbox(ctx context.Context, pool *pgxpool.Pool, since time.Time) (outboxReport, error) {
 	var rep outboxReport
-	if err := pool.QueryRow(ctx, `SELECT count(*), count(published_at) FROM outbox_events WHERE occurred_at >= $1`,
-		since).Scan(&rep.total, &rep.published); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*), count(published_at), count(dead_at) FROM outbox_events WHERE occurred_at >= $1`,
+		since).Scan(&rep.total, &rep.published, &rep.dead); err != nil {
 		return outboxReport{}, err
 	}
 	var seconds []*float64

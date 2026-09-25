@@ -59,18 +59,27 @@ nesta ordem:
    exato que `-dup` já cobre.
 3. Caso contrário, gera uma nova operação `BET` de `1.00 BRL` com `externalTransactionId` novo
    (UUID) contra a carteira quente (probabilidade `-hot`) ou uma das demais carteiras escolhida
-   uniformemente (probabilidade `1 - hot`), e a registra no buffer compartilhado para uma futura
-   iteração de conflito de qualquer worker.
+   uniformemente (probabilidade `1 - hot`). Só depois que essa submissão volta com `201` (já
+   processada pelo servidor) é que a operação entra no buffer compartilhado, para que uma futura
+   iteração de conflito de qualquer worker sempre mire uma operação que já foi de fato aceita, não
+   uma ainda em voo.
+
+A latência de cada requisição entra nos percentis gerais (`## Resultado`) não importa o caminho
+que ela seguiu, então um `409` de `-conflict` ou um `200` de `-dup` contam para o p50/p95/p99
+tanto quanto um `201` novo.
 
 Ao fim da janela de `-duration`, o gerador espera até `-drain-timeout` (10 min por padrão) a
 outbox global drenar (`published_at IS NULL AND dead_at IS NULL` chegar a zero via a contagem
 apoiada no índice parcial), depois mede, só para os eventos ocorridos desde o início da carga
-(`occurred_at >= início`): quantos existem, quantos foram publicados, e o atraso
-`published_at - occurred_at` em p50/p95/p99 (`percentile_cont`). `percentile_cont` ignora valores
-nulos, então uma outbox que não drenou dentro do limite produz percentis só sobre o que já
-publicou — o relatório declara isso explicitamente e imprime publicados/total lado a lado, para
-que a leitura não confunda "percentil baixo" com "outbox rápida" quando, na verdade, parte dos
-eventos mais lentos ainda não tinha `published_at`. Por fim chama
+(`occurred_at >= início`): quantos existem, quantos foram publicados, quantos foram mortos (DLQ,
+`dead_at` preenchido), e o atraso `published_at - occurred_at` em p50/p95/p99
+(`percentile_cont`). Publicado e morto são desfechos mutuamente exclusivos; só o que sobra
+(`total - publicados - mortos`) está de fato ainda em voo. `percentile_cont` ignora valores nulos,
+então uma outbox com eventos ainda em voo produz percentis só sobre o que já publicou — o
+relatório declara isso explicitamente e imprime publicados/mortos/total lado a lado, para que a
+leitura não confunda "percentil baixo" com "outbox rápida" quando, na verdade, parte dos eventos
+mais lentos ainda não tinha `published_at`, nem conte um evento morto como se ainda estivesse
+pendente. Por fim chama
 `POST /wallets/{id}/reconciliation` em todas as carteiras abertas — qualquer `consistent=false` é
 reportado como divergência.
 
@@ -115,9 +124,9 @@ backlog da outra:
 
 Contagem bruta por código HTTP: `200=3265, 201=29206, 409=598`.
 
-**Outbox**: 58416 eventos observados desde o início da carga, **58416 publicados (100%) — drenou
-completamente** dentro do limite de 10 min (levou cerca de 3 min 39 s depois do fim da carga).
-Os percentis cobrem todos os eventos, sem censura.
+**Outbox**: 58416 eventos observados desde o início da carga, **58416 publicados (100%)**, mortos
+(DLQ): 0 — **drenou completamente** dentro do limite de 10 min (levou cerca de 3 min 39 s depois
+do fim da carga). Os percentis cobrem todos os eventos, sem censura.
 
 | Percentil | Atraso (`occurred_at` -> `published_at`) |
 |---|---|
@@ -152,9 +161,9 @@ Os percentis cobrem todos os eventos, sem censura.
 
 Contagem bruta por código HTTP: `200=1127, 201=10729, 409=207`.
 
-**Outbox**: 21460 eventos observados, **21460 publicados (100%) — drenou completamente** dentro
-do limite de 10 min (levou cerca de 2 min 3 s depois do fim da carga, mais rápido que a execução
-padrão porque gerou bem menos eventos: 21460 contra 58416).
+**Outbox**: 21460 eventos observados, **21460 publicados (100%)**, mortos (DLQ): 0 — **drenou
+completamente** dentro do limite de 10 min (levou cerca de 2 min 3 s depois do fim da carga, mais
+rápido que a execução padrão porque gerou bem menos eventos: 21460 contra 58416).
 
 | Percentil | Atraso (`occurred_at` -> `published_at`) |
 |---|---|
@@ -182,16 +191,19 @@ voo de cada worker cancelada quando o contexto de `-duration` expira, não uma f
 (nenhum `5xx` em nenhuma execução).
 
 A outbox agora drena completamente dentro da janela de 10 min nas duas execuções — o relay
-corrigido (`dd8a52b`..`e5d7e9c`, ver Ambiente) elimina os `57014` e drena o backlog de uma carga
-de 60 s em poucos minutos, contra uma cauda estimada acima de 25 min antes das mudanças
-(ADR 0014, seção Revisão). O atraso ainda é alto em termos
-absolutos: p50 de 91.6 s e p99 de 217.2 s na execução padrão (551.7 req/s de ingestão), contra
-p50 de 68.6 s e p99 de 121.7 s na execução quente (201.6 req/s) — o atraso escala com a taxa de
-ingestão de eventos, não com `-hot`: a execução quente tem p99 de latência HTTP pior, mas atraso
-de outbox melhor, porque gera bem menos eventos por segundo (menor throughput HTTP). O teto
-remanescente não é mais o claim da outbox no PostgreSQL; é o throughput de publicação no LocalStack
-SNS, que satura por volta de 150–300 publishes/s nesta máquina (ADR 0014, seção Revisão) enquanto a
-carga chega a ingerir cerca de 1000 eventos/s.
+corrigido (commits `dd8a52b`..`e5d7e9c`, ver Ambiente e ADR 0014, seção "Revisão") elimina os
+`57014` e drena o backlog de uma carga de 60 s em poucos minutos. Antes dessas mudanças, sob uma
+carga parecida (`-hot 0.2`, ~500 req/s), a outbox não drenava (~35 mil eventos pendentes ao fim da
+carga) e, com o atraso concentrado na carteira quente, a partição só avançava a cerca de 5,9
+eventos/s (um evento por intervalo de polling por relay), o que projetava uma cauda estimada acima
+de 25 min. O atraso ainda é alto em termos absolutos: p50 de 91.6 s e p99 de 217.2 s na execução
+padrão (551.7 req/s de ingestão), contra p50 de 68.6 s e p99 de 121.7 s na execução quente
+(201.6 req/s) — o atraso escala com a taxa de ingestão de eventos, não com `-hot`: a execução
+quente tem p99 de latência HTTP pior, mas atraso de outbox melhor, porque gera bem menos eventos
+por segundo (menor throughput HTTP). O teto remanescente não é mais o claim da outbox no
+PostgreSQL; é o throughput de publicação no LocalStack SNS, que satura (CPU acima de 100%) por
+volta de 150–300 publicações/s nesta máquina enquanto a carga chega a ingerir cerca de 1000
+eventos/s (ADR 0014, seção "Revisão").
 
 ## Limitações
 

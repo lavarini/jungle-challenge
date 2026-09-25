@@ -67,12 +67,30 @@ type environment struct {
 }
 
 // outboxReport holds, for events that occurred since the load started: how many there are, how
-// many were published, and the three publish-delay percentiles (nil when nothing was published
-// yet). published < total means the percentiles are right-censored - see writeReport's Outbox
-// section, which says so explicitly whenever that happens.
+// many were published, how many were dead-lettered, and the three publish-delay percentiles (nil
+// when nothing was published yet). A row is either published or dead-lettered, never both, so
+// total-published-dead is the count still genuinely in flight - the only one that makes the
+// percentiles right-censored (see outboxSummary).
 type outboxReport struct {
-	total, published int
-	p50, p95, p99    *float64
+	total, published, dead int
+	p50, p95, p99          *float64
+}
+
+// outboxSummary renders the two Outbox-section bullets that describe drain status and percentile
+// coverage. A row is either published or dead-lettered, never both, so pending = total - published
+// - dead is the only count that is genuinely still in flight; dead-lettered rows must not inflate
+// it (an earlier version of this function counted them as pending, which could print "não
+// drenou... pendentes" even after every row had resolved one way or the other). It is pure - no DB
+// access - specifically so this arithmetic can be unit tested directly.
+func outboxSummary(total, published, dead int, drainTimeout time.Duration) (status, coverage string) {
+	pending := total - published - dead
+	if pending <= 0 {
+		return fmt.Sprintf("Drenou completamente dentro do limite de espera (%s).", drainTimeout),
+			fmt.Sprintf("Os percentis abaixo cobrem todos os %d eventos publicados.", published)
+	}
+	return fmt.Sprintf("**Não drenou** dentro do limite de espera (%s): %d evento(s) ainda pendente(s).", drainTimeout, pending),
+		fmt.Sprintf("Os percentis abaixo cobrem só os %d já publicados; percentile_cont ignora os pendentes, então são "+
+			"right-censored — a cauda real do atraso é maior do que estes números.", published)
 }
 
 // reconciliationSummary counts how many opened wallets reconciled cleanly.
@@ -84,7 +102,7 @@ type reconciliationSummary struct {
 
 // writeReport renders the full Markdown report described in docs/CARGA.md's methodology section:
 // environment, throughput, latency percentiles, status counts, outbox delay and reconciliation.
-func writeReport(w io.Writer, env environment, elapsed time.Duration, stats latencyStats, statusCounts map[string]int, rawStatusCounts map[int]int, transportErrors int, drainOK bool, outbox outboxReport, recon reconciliationSummary) {
+func writeReport(w io.Writer, env environment, elapsed time.Duration, stats latencyStats, statusCounts map[string]int, rawStatusCounts map[int]int, transportErrors int, outbox outboxReport, recon reconciliationSummary) {
 	fmt.Fprintf(w, "# Relatório de carga\n\n")
 
 	fmt.Fprintf(w, "## Ambiente\n\n")
@@ -136,18 +154,13 @@ func writeReport(w io.Writer, env environment, elapsed time.Duration, stats late
 		fmt.Fprintf(w, "\n\n")
 	}
 
-	pending := outbox.total - outbox.published
 	fmt.Fprintf(w, "## Outbox\n\n")
 	fmt.Fprintf(w, "- Eventos observados desde o início da carga (`occurred_at >= início`): %d\n", outbox.total)
 	fmt.Fprintf(w, "- Publicados: %d\n", outbox.published)
-	if drainOK && pending == 0 {
-		fmt.Fprintf(w, "- Drenou completamente dentro do limite de espera (%s).\n", env.cfg.drainTimeout)
-		fmt.Fprintf(w, "- Os percentis abaixo cobrem todos os %d eventos.\n\n", outbox.total)
-	} else {
-		fmt.Fprintf(w, "- **Não drenou** dentro do limite de espera (%s): %d evento(s) ainda pendentes.\n", env.cfg.drainTimeout, pending)
-		fmt.Fprintf(w, "- Os percentis abaixo cobrem só os %d já publicados; percentile_cont ignora os pendentes, então são "+
-			"right-censored — a cauda real do atraso é maior do que estes números.\n\n", outbox.published)
-	}
+	fmt.Fprintf(w, "- Mortos (DLQ): %d\n", outbox.dead)
+	status, coverage := outboxSummary(outbox.total, outbox.published, outbox.dead, env.cfg.drainTimeout)
+	fmt.Fprintf(w, "- %s\n", status)
+	fmt.Fprintf(w, "- %s\n\n", coverage)
 	fmt.Fprintf(w, "| Percentil | Atraso (occurred_at -> published_at) |\n|---|---|\n")
 	fmt.Fprintf(w, "| p50 | %s |\n", fmtSecondsPtr(outbox.p50))
 	fmt.Fprintf(w, "| p95 | %s |\n", fmtSecondsPtr(outbox.p95))
