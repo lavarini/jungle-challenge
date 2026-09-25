@@ -1,6 +1,6 @@
 GO ?= go
 
-.PHONY: fmt-check vet lint test test-race test-failpoint test-integration test-e2e test-crash evidence up up-multi down smoke
+.PHONY: fmt-check vet lint test test-race test-failpoint test-integration test-e2e test-crash evidence up up-multi down smoke load
 
 fmt-check:
 	@out=$$(gofmt -l .); if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
@@ -44,3 +44,6 @@ down:
 
 smoke:
 	./scripts/smoke.sh
+
+load:
+	$(GO) run ./cmd/load $(LOAD_ARGS)

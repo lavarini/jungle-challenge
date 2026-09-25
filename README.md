@@ -39,6 +39,7 @@ docker compose --profile multi down -v
 | `make test-crash` | queda abrupta (`os.Exit(137)` por failpoint) nas janelas de commit, publicação e claim; `SIGKILL` e reinício; `SIGTERM` |
 | `make test-failpoint` | testes do pacote de failpoints com `-tags failpoint` |
 | `make evidence` | roda todas as suítes com `-json` e regenera `docs/EVIDENCIAS.md` (~4 min) |
+| `make load` | teste de carga contra o Compose `--profile multi`; relatório em Markdown ([`docs/CARGA.md`](docs/CARGA.md)) |
 
 Papéis do processo: `WAGERD_ROLE=api|consumer|outbox-relay|reference-worker|all`. O Compose
 roda `all` nas três instâncias.
