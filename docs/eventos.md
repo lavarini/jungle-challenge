@@ -3,7 +3,7 @@
 Este documento descreve os contratos de mensageria: a mensagem que entra pela fila SQS e os
 eventos de integração que saem pelo tópico SNS. As decisões estão nos ADRs
 [0012](adr/0012-eventos-de-saida-em-sns-fifo.md), [0013](adr/0013-dlq-explicita-para-mensagem-invalida.md) e
-[0014](adr/0014-relay-da-outbox-por-cabeca-de-particao.md); a seção 4 da [desenho](design.md)
+[0014](adr/0014-relay-da-outbox-por-cabeca-de-particao.md); a seção 4 do [desenho da solução](design.md)
 tem o fluxo completo.
 
 ## Entrada: `wager-transactions.fifo`

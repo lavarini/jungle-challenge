@@ -10,7 +10,7 @@ SNS FIFO e invariantes financeiras impostas no PostgreSQL. O enunciado está em
 |---|---|
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | visão, fluxo, garantias e onde são impostas, falhas, limitações |
 | [`docs/EVIDENCIAS.md`](docs/EVIDENCIAS.md) | cada requisito com os testes que o provam, gerado pela execução |
-| [`docs/adr/`](docs/adr/README.md) | 20 decisões de arquitetura |
+| [`docs/adr/`](docs/adr/README.md) | 19 decisões de arquitetura |
 | [`docs/openapi.yaml`](docs/openapi.yaml) | contrato HTTP |
 | [`docs/eventos.md`](docs/eventos.md) | mensagem de entrada e eventos de saída |
 | [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | o que fazer com DLQ, quarentena, `FAILED`, divergência, pendência e backlog |

@@ -1,6 +1,6 @@
 # Arquitetura
 
-Visão consolidada. O detalhe está na [desenho](docs/design.md),
+Visão consolidada. O detalhe está no [desenho da solução](docs/design.md),
 e cada decisão tem um ADR em [`docs/adr/`](docs/adr/README.md). A prova de cada garantia está em
 [`docs/EVIDENCIAS.md`](docs/EVIDENCIAS.md), gerado a partir da execução dos testes.
 
@@ -8,7 +8,7 @@ e cada decisão tem um ADR em [`docs/adr/`](docs/adr/README.md). A prova de cada
 
 Um binário, `wagerd`, com papéis escolhidos por `WAGERD_ROLE`: `api`, `consumer`, `outbox-relay`,
 `reference-worker` ou `all` ([ADR 0002](docs/adr/0002-monolito-modular-com-papeis-fx.md),
-[ADR 0020](docs/adr/0020-papeis-de-worker-separados.md)). O Uber Fx compõe só os módulos do papel.
+[ADR 0019](docs/adr/0019-papeis-de-worker-separados.md)). O Uber Fx compõe só os módulos do papel.
 Não há estado em memória que importe à correção: qualquer número de instâncias de qualquer papel
 roda contra o mesmo PostgreSQL, e o banco é o único árbitro.
 
@@ -111,6 +111,5 @@ cardinalidade aparece em rótulos. O [RUNBOOK](docs/RUNBOOK.md) diz o que fazer 
 
 ## Não concluído
 
-- Teste de carga (opcional no plano do dia 3).
+- Teste de carga (opcional, ver [ADR 0003](docs/adr/0003-execucao-em-fatias-verticais.md)).
 - Tracing com OpenTelemetry e dashboards (diferenciais opcionais do enunciado).
-
