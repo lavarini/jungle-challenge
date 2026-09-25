@@ -96,7 +96,7 @@ func postJSON(ctx context.Context, method, target, bearer, idemKey string, body,
 	if out != nil {
 		if err := json.NewDecoder(resp.Body).Decode(out); err != nil && err != io.EOF {
 			io.Copy(io.Discard, resp.Body) //nolint:errcheck // best-effort drain on decode failure
-			return resp.StatusCode, nil
+			return resp.StatusCode, fmt.Errorf("decode response body: %w", err)
 		}
 		return resp.StatusCode, nil
 	}

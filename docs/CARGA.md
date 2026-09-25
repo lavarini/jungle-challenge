@@ -6,9 +6,15 @@ erros, conflitos e atraso da outbox.
 
 ## Comando reproduzível
 
+Cada execução documentada parte de um stack novo, para que uma execução nunca herde o backlog da
+outbox de uma anterior:
+
 ```sh
+docker compose --profile multi down -v            # se já houver um stack de uma execução anterior
 docker compose --profile multi up --build -d --wait
 make load                          | tee load-1.md      # -hot 0.2 (padrão)
+docker compose --profile multi down -v
+docker compose --profile multi up --build -d --wait
 make load LOAD_ARGS="-hot 0.8"     | tee load-hot.md
 docker compose --profile multi down -v
 ```
@@ -30,29 +36,47 @@ limpo usa sem precisar de override.
   Keycloak e LocalStack.
 - Imagens (de `docker-compose.yml`): `postgres:17.6-alpine`, `quay.io/keycloak/keycloak:26.3.3`,
   `localstack/localstack:4.7.0`, `wagerd:local` (build local, `Dockerfile` do repositório).
+- O relay da outbox inclui as três mudanças de `dd8a52b`..`e5d7e9c`: claim por skip scan (não
+  depende mais de estatísticas atualizadas da tabela), publicação paralela das cabeças de um lote
+  (`OUTBOX_PUBLISH_CONCURRENCY=16`, o padrão) e reivindicação imediata de um novo lote quando o
+  anterior não veio vazio. Isso eliminou os erros `57014` (`canceling statement due to statement
+  timeout`) que apareciam na claim sob carga antes dessas mudanças.
 - O gerador de carga (`cmd/load`) rodou na mesma máquina que a stack — ver Limitações.
 
 ## Metodologia
 
 `cmd/load` obtém tokens `client_credentials` de `provider-a` e `wallet-internal` no Keycloak
 (mesmo fluxo de `scripts/smoke.sh`), abre `-wallets` carteiras com `100000.00 BRL` (a primeira é
-a "quente") e sobe `-concurrency` goroutines por `-duration`. Cada iteração:
+a "quente") e sobe `-concurrency` goroutines por `-duration`. Cada iteração de cada worker segue,
+nesta ordem:
 
-1. Escolhe uma das `-api` em round-robin (contador atômico global, uma requisição por vez).
-2. Com probabilidade `-dup`, reenvia a última operação do próprio worker com a mesma
-   `Idempotency-Key` (exercita o caminho de replay idempotente, HTTP 200).
+1. Com probabilidade `-dup`, reenvia a **própria** última operação com a mesma `Idempotency-Key`
+   e o mesmo corpo — exercita o caminho de replay idempotente (HTTP 200).
+2. Senão, com probabilidade `-conflict`, reaproveita a `Idempotency-Key` de uma operação recente
+   de **qualquer** worker (um buffer circular compartilhado, `recentOps`, protegido por mutex) com
+   um valor diferente (`2.00` em vez de `1.00`) — mesma chave, hash diferente. Isso é o que faz o
+   servidor responder `409 IDEMPOTENCY_PAYLOAD_MISMATCH` sob concorrência real, não só o replay
+   exato que `-dup` já cobre.
 3. Caso contrário, gera uma nova operação `BET` de `1.00 BRL` com `externalTransactionId` novo
    (UUID) contra a carteira quente (probabilidade `-hot`) ou uma das demais carteiras escolhida
-   uniformemente (probabilidade `1 - hot`).
+   uniformemente (probabilidade `1 - hot`), e a registra no buffer compartilhado para uma futura
+   iteração de conflito de qualquer worker.
 
-Ao fim da janela de `-duration`, o gerador espera até 60 s a outbox drenar
-(`published_at IS NULL AND dead_at IS NULL` chegar a zero), mede o atraso
-`published_at - occurred_at` para os eventos ocorridos desde o início da carga
-(`percentile_cont` em 0.5/0.95/0.99) e chama `POST /wallets/{id}/reconciliation` em todas as
-carteiras abertas — qualquer `consistent=false` é reportado como divergência.
+Ao fim da janela de `-duration`, o gerador espera até `-drain-timeout` (10 min por padrão) a
+outbox global drenar (`published_at IS NULL AND dead_at IS NULL` chegar a zero via a contagem
+apoiada no índice parcial), depois mede, só para os eventos ocorridos desde o início da carga
+(`occurred_at >= início`): quantos existem, quantos foram publicados, e o atraso
+`published_at - occurred_at` em p50/p95/p99 (`percentile_cont`). `percentile_cont` ignora valores
+nulos, então uma outbox que não drenou dentro do limite produz percentis só sobre o que já
+publicou — o relatório declara isso explicitamente e imprime publicados/total lado a lado, para
+que a leitura não confunda "percentil baixo" com "outbox rápida" quando, na verdade, parte dos
+eventos mais lentos ainda não tinha `published_at`. Por fim chama
+`POST /wallets/{id}/reconciliation` em todas as carteiras abertas — qualquer `consistent=false` é
+reportado como divergência.
 
 Duas execuções, variando só `-hot`, para isolar o efeito da contenção de escrita numa única
-carteira:
+carteira — cada uma num stack novo (`down -v` + `up --build -d --wait`), então nenhuma herda
+backlog da outra:
 
 | Flag | Padrão | Execução "quente" |
 |---|---|---|
@@ -61,113 +85,130 @@ carteira:
 | `-wallets` | 50 | 50 |
 | `-hot` | 0.2 | 0.8 |
 | `-dup` | 0.1 | 0.1 |
+| `-conflict` | 0.02 | 0.02 |
+| `-drain-timeout` | 10m | 10m |
 
 ## Resultados
 
 ### Execução padrão (`-hot 0.2`)
 
-- Total de requisições: 26576
-- Duração efetiva: 60.000492762s
-- Throughput: **442.9 req/s**
+- Total de requisições: 33101
+- Duração efetiva: 60.00048271s
+- Throughput: **551.7 req/s**
 
 | Métrica | Valor |
 |---|---|
-| p50 | 16.2 ms |
-| p95 | 418.3 ms |
-| p99 | 982.0 ms |
-| max | 3262.4 ms |
+| p50 | 13.8 ms |
+| p95 | 328.7 ms |
+| p99 | 845.9 ms |
+| max | 3755.5 ms |
 
 | Status | Contagem |
 |---|---|
-| 201 novo | 23913 |
-| 200 replay | 2631 |
-| 409 conflito | 0 |
+| 201 novo | 29206 |
+| 200 replay | 3265 |
+| 409 conflito | 598 |
 | 422 | 0 |
 | 5xx | 0 |
 | outros HTTP | 0 |
 | erro de transporte | 32 |
 
-Contagem bruta por código HTTP: `200=2631, 201=23913`.
+Contagem bruta por código HTTP: `200=3265, 201=29206, 409=598`.
 
-**Outbox**: não drenou dentro do limite de 60 s (38934 eventos ainda pendentes).
+**Outbox**: 58416 eventos observados desde o início da carga, **58416 publicados (100%) — drenou
+completamente** dentro do limite de 10 min (levou cerca de 3 min 39 s depois do fim da carga).
+Os percentis cobrem todos os eventos, sem censura.
 
 | Percentil | Atraso (`occurred_at` -> `published_at`) |
 |---|---|
-| p50 | 75.736 s |
-| p95 | 103.884 s |
-| p99 | 106.544 s |
+| p50 | 91.603 s |
+| p95 | 208.966 s |
+| p99 | 217.193 s |
 
 **Reconciliação**: 50/50 carteiras com `consistent=true`.
 
 ### Execução com contenção (`-hot 0.8`)
 
-- Total de requisições: 12019
-- Duração efetiva: 60.000686841s
-- Throughput: **200.3 req/s**
+- Total de requisições: 12095
+- Duração efetiva: 60.001481214s
+- Throughput: **201.6 req/s**
 
 | Métrica | Valor |
 |---|---|
-| p50 | 21.9 ms |
-| p95 | 712.1 ms |
-| p99 | 1240.0 ms |
-| max | 2633.5 ms |
+| p50 | 22.0 ms |
+| p95 | 748.2 ms |
+| p99 | 1426.0 ms |
+| max | 4313.8 ms |
 
 | Status | Contagem |
 |---|---|
-| 201 novo | 10832 |
-| 200 replay | 1155 |
-| 409 conflito | 0 |
+| 201 novo | 10729 |
+| 200 replay | 1127 |
+| 409 conflito | 207 |
 | 422 | 0 |
 | 5xx | 0 |
 | outros HTTP | 0 |
 | erro de transporte | 32 |
 
-Contagem bruta por código HTTP: `200=1155, 201=10832`.
+Contagem bruta por código HTTP: `200=1127, 201=10729, 409=207`.
 
-**Outbox**: não drenou dentro do limite de 60 s (39348 eventos ainda pendentes). Esta execução
-começou logo após a anterior, sem esperar o backlog dela drenar por completo — ver Limitações.
+**Outbox**: 21460 eventos observados, **21460 publicados (100%) — drenou completamente** dentro
+do limite de 10 min (levou cerca de 2 min 3 s depois do fim da carga, mais rápido que a execução
+padrão porque gerou bem menos eventos: 21460 contra 58416).
 
 | Percentil | Atraso (`occurred_at` -> `published_at`) |
 |---|---|
-| p50 | 23.715 s |
-| p95 | 41.752 s |
-| p99 | 92.137 s |
+| p50 | 68.565 s |
+| p95 | 118.051 s |
+| p99 | 121.702 s |
 
 **Reconciliação**: 50/50 carteiras com `consistent=true`.
 
 ## Leitura
 
-A contenção na carteira quente aparece claramente em latência e throughput: de 0.2 para 0.8 de
-`-hot`, o p99 sobe de 982 ms para 1240 ms (e o p95 quase dobra, de 418 ms para 712 ms), enquanto o
-throughput cai de 442.9 para 200.3 req/s com a mesma concorrência — as goroutines passam mais
-tempo esperando a mesma linha. Ela **não** aparece como conflito HTTP: as duas execuções tiveram
-zero `409`, porque a escrita da carteira usa `SELECT ... FOR UPDATE` (`internal/app/submit_wager.go`)
-e serializa concorrentes por bloqueio de linha em vez de rejeitá-los — o efeito observável do lado
-do cliente é latência, não status code. `409` (`IDEMPOTENCY_KEY_MISMATCH`/`IDEMPOTENCY_PAYLOAD_MISMATCH`)
-também não foi exercitado porque o gerador nunca envia a mesma `Idempotency-Key` de dois workers
-ao mesmo tempo — cada worker só reenvia a própria última operação. Os 32 erros de transporte de
-cada execução batem exatamente com `-concurrency`: é a requisição em voo de cada worker cancelada
-quando o contexto de `-duration` expira, não uma falha do serviço (nenhum `5xx` apareceu em
-nenhuma execução). A outbox foi o maior gargalo: sob 442.9 req/s ela não drena nem perto do limite
-de 60 s (p99 de atraso acima de 100 s), e os três `wagerd` chegaram a logar
-`outbox claim failed: ... canceling statement due to statement timeout (SQLSTATE 57014)` durante
-a disputa pelas linhas — a taxa de geração de eventos superou a capacidade do relay nesta máquina.
+A contenção na carteira quente aparece em latência, throughput **e**, agora, em conflitos: de
+`-hot 0.2` para `0.8`, o p99 de latência HTTP sobe de 846 ms para 1426 ms (p95 quase dobra, de
+329 ms para 748 ms) e o throughput cai de 551.7 para 201.6 req/s com a mesma concorrência — mais
+tempo esperando o `SELECT ... FOR UPDATE` da mesma linha (`internal/app/submit_wager.go`). Ela
+**não** aparece como conflito de idempotência por contenção de escrita em si: o `409` observado
+(598 e 207 nas duas execuções, ambos próximos dos `~2%` de `-conflict`) vem inteiramente do
+mecanismo dedicado do gerador — reenviar a `Idempotency-Key` de uma operação recente com um valor
+diferente — não de duas requisições novas colidindo por acaso. Sem esse mecanismo (como na v1
+deste gerador, com só `-dup`), o `409` fica em zero mesmo sob 80% de tráfego na carteira quente,
+porque o lock de linha serializa concorrentes em vez de rejeitá-los.
+
+Os 32 erros de transporte de cada execução batem exatamente com `-concurrency`: é a requisição em
+voo de cada worker cancelada quando o contexto de `-duration` expira, não uma falha do serviço
+(nenhum `5xx` em nenhuma execução).
+
+A outbox agora drena completamente dentro da janela de 10 min nas duas execuções — o relay
+corrigido (`dd8a52b`..`e5d7e9c`, ver Ambiente) elimina os `57014` e drena o backlog de uma carga
+de 60 s em poucos minutos, contra uma cauda estimada acima de 25 min antes das mudanças
+(ADR 0014, seção Revisão). O atraso ainda é alto em termos
+absolutos: p50 de 91.6 s e p99 de 217.2 s na execução padrão (551.7 req/s de ingestão), contra
+p50 de 68.6 s e p99 de 121.7 s na execução quente (201.6 req/s) — o atraso escala com a taxa de
+ingestão de eventos, não com `-hot`: a execução quente tem p99 de latência HTTP pior, mas atraso
+de outbox melhor, porque gera bem menos eventos por segundo (menor throughput HTTP). O teto
+remanescente não é mais o claim da outbox no PostgreSQL; é o throughput de publicação no LocalStack
+SNS, que satura por volta de 150–300 publishes/s nesta máquina (ADR 0014, seção Revisão) enquanto a
+carga chega a ingerir cerca de 1000 eventos/s.
 
 ## Limitações
 
 - **LocalStack não é SQS/SNS real**: sem a latência de rede, os limites de throughput e o
-  comportamento de scaling de uma fila/tópico gerenciados; os números aqui não predizem o
-  comportamento em produção na AWS.
+  comportamento de scaling de uma fila/tópico gerenciados. O teto de publicação observado
+  (~150–300 publishes/s) é um limite do LocalStack local, não da AWS; os números de atraso da
+  outbox aqui não predizem o comportamento em produção.
 - **Mesma máquina para gerador e sistema**: o gerador de carga, os três `wagerd`, o PostgreSQL, o
   Keycloak e o LocalStack disputam os mesmos 12 CPUs. Throughput e latência não isolam custo de
   cliente e servidor.
-- **As duas execuções rodaram em sequência sem esperar a outbox drenar por completo**: a segunda
-  herda parte do backlog de eventos pendentes da primeira, o que mistura o efeito nos números de
-  atraso da outbox reportados para ela (provavelmente favorecendo-a, já que ela mesma gerou menos
-  eventos por segundo que a primeira).
-- **O gerador não exercita corrida na mesma `Idempotency-Key`**: cada worker só reenvia a própria
-  última operação, nunca a de outro, então `409` por conflito de idempotência nunca aparece por
-  construção — só serve para validar o caminho de replay (`200`), não o de conflito de chave.
-- **O limite de 60 s de espera pela outbox é insuficiente sob esta carga**: os percentis de atraso
-  reportados vêm de uma consulta feita ao fim da espera, mesmo com milhares de eventos ainda
-  pendentes; eles não são um atraso "final", só o estado observado naquele instante.
+- **O `409` é inteiramente do mecanismo dedicado (`-conflict`), não de uma corrida orgânica**: o
+  gerador reaproveita deliberadamente uma `Idempotency-Key` recente com outro valor; ele não faz
+  duas requisições novas colidirem por acaso na mesma chave. Isso exercita o caminho de
+  `IDEMPOTENCY_PAYLOAD_MISMATCH` sob concorrência real (o alvo pode ter sido gerado por outro
+  worker), mas não mede a taxa "natural" de conflito de um provedor real reenviando por conta
+  própria.
+- **O atraso da outbox reportado é por evento publicado, não por carteira**: a carteira quente
+  tem um único evento em voo por vez (design serial por partição, ADR 0014), então sob carga
+  sustentada ela pode acumular fila própria mesmo com o relay saudável; este teste não separa o
+  atraso da carteira quente do atraso médio.

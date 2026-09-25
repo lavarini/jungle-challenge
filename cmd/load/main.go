@@ -31,25 +31,30 @@ const (
 	internalClientID = "wallet-internal"
 	internalSecret   = "wallet-internal-dev-secret"
 
-	currency      = "BRL"
-	walletBalance = "100000.00"
-	betAmount     = "1.00"
-	roundID       = "round-1"
-	gameID        = "load-game"
+	currency       = "BRL"
+	walletBalance  = "100000.00"
+	betAmount      = "1.00"
+	conflictAmount = "2.00" // any value different from betAmount; see withConflictingPayload
+	roundID        = "round-1"
+	gameID         = "load-game"
 
-	outboxDrainTimeout = 60 * time.Second
-	outboxDrainPoll    = 500 * time.Millisecond
+	outboxDrainPoll = 500 * time.Millisecond
+
+	// recentOpsCapacity bounds the shared ring buffer that -conflict picks a target from.
+	recentOpsCapacity = 512
 )
 
 type flags struct {
-	apis        []string
-	kc          string
-	duration    time.Duration
-	concurrency int
-	wallets     int
-	hot         float64
-	dup         float64
-	db          string
+	apis         []string
+	kc           string
+	duration     time.Duration
+	concurrency  int
+	wallets      int
+	hot          float64
+	dup          float64
+	conflict     float64
+	db           string
+	drainTimeout time.Duration
 }
 
 func parseFlags() flags {
@@ -61,19 +66,23 @@ func parseFlags() flags {
 	wallets := flag.Int("wallets", 50, "number of wallets to open before the load; the first is the hot wallet")
 	hot := flag.Float64("hot", 0.2, "fraction of requests targeting the hot wallet")
 	dup := flag.Float64("dup", 0.1, "fraction of requests that replay the worker's last operation with the same Idempotency-Key")
+	conflict := flag.Float64("conflict", 0.02, "fraction of requests that reuse another worker's recent Idempotency-Key with a different payload (exercises 409 IDEMPOTENCY_PAYLOAD_MISMATCH)")
 	db := flag.String("db", "postgres://wager_app:app-dev-only@localhost:5432/wagering?sslmode=disable",
 		"DSN used to measure the outbox (wager_app role; falls back to postgres-dev-only if it lacks SELECT)")
+	drainTimeout := flag.Duration("drain-timeout", 10*time.Minute, "how long to wait for the outbox to fully drain before measuring delay")
 	flag.Parse()
 
 	return flags{
-		apis:        strings.Split(*apiList, ","),
-		kc:          *kc,
-		duration:    *duration,
-		concurrency: *concurrency,
-		wallets:     *wallets,
-		hot:         *hot,
-		dup:         *dup,
-		db:          *db,
+		apis:         strings.Split(*apiList, ","),
+		kc:           *kc,
+		duration:     *duration,
+		concurrency:  *concurrency,
+		wallets:      *wallets,
+		hot:          *hot,
+		dup:          *dup,
+		conflict:     *conflict,
+		db:           *db,
+		drainTimeout: *drainTimeout,
 	}
 }
 
@@ -137,20 +146,20 @@ func run(cfg flags, out *os.File) error {
 	}
 	stats := computeLatencyStats(latencies)
 
-	log.Printf("waiting for the outbox to drain (limit %s)", outboxDrainTimeout)
+	log.Printf("waiting for the outbox to drain (limit %s)", cfg.drainTimeout)
 	pool, err := pgxpool.New(ctx, cfg.db)
 	if err != nil {
 		return fmt.Errorf("outbox db pool: %w", err)
 	}
 	defer pool.Close()
 
-	drainOK, drainRemaining, err := waitOutboxDrained(ctx, pool, outboxDrainTimeout)
+	drainOK, err := waitOutboxDrained(ctx, pool, cfg.drainTimeout)
 	if err != nil {
 		return fmt.Errorf("outbox drain check: %w", err)
 	}
-	outbox, err := outboxDelays(ctx, pool, loadStart)
+	outbox, err := measureOutbox(ctx, pool, loadStart)
 	if err != nil {
-		return fmt.Errorf("outbox delay query: %w", err)
+		return fmt.Errorf("outbox measurement: %w", err)
 	}
 
 	log.Printf("reconciling %d wallets", len(wallets))
@@ -167,7 +176,7 @@ func run(cfg flags, out *os.File) error {
 	}
 
 	env := environment{numCPU: runtime.NumCPU(), goos: runtime.GOOS, goarch: runtime.GOARCH, cfg: cfg}
-	writeReport(out, env, elapsed, stats, statusCounts, rawStatusCounts, transportErrors, drainOK, drainRemaining, outbox, recon)
+	writeReport(out, env, elapsed, stats, statusCounts, rawStatusCounts, transportErrors, drainOK, outbox, recon)
 
 	if len(recon.inconsistent) > 0 || len(recon.failed) > 0 {
 		return fmt.Errorf("reconciliation found %d divergence(s) and %d failed call(s); see the report above",
@@ -197,14 +206,19 @@ func categorize(status int) string {
 }
 
 // runLoad fans out cfg.concurrency workers for cfg.duration and returns each worker's results.
-// Each iteration round-robins across cfg.apis and either replays the worker's last operation
-// (probability cfg.dup) or submits a new BET against the hot wallet (probability cfg.hot) or a
-// uniformly chosen non-hot wallet.
+// Each iteration round-robins across cfg.apis and picks one of three paths, checked in order:
+//  1. probability cfg.dup: replay the worker's own last operation (same key, same payload; 200).
+//  2. probability cfg.conflict: reuse a recent operation from the shared recent pool (possibly
+//     submitted by another worker) with a different payload (same key, different hash; 409
+//     IDEMPOTENCY_PAYLOAD_MISMATCH).
+//  3. otherwise: submit a new BET against the hot wallet (probability cfg.hot) or a uniformly
+//     chosen non-hot wallet, and record it in recent for other workers' future conflicts.
 func runLoad(cfg flags, providerTok string, wallets []wallet) [][]opResult {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.duration)
 	defer cancel()
 
 	var apiIdx atomic.Uint64
+	recent := newRecentOps(recentOpsCapacity)
 	results := make([][]opResult, cfg.concurrency)
 	var wg sync.WaitGroup
 	for id := 0; id < cfg.concurrency; id++ {
@@ -222,9 +236,17 @@ func runLoad(cfg flags, providerTok string, wallets []wallet) [][]opResult {
 
 				var body submitRequest
 				var idemKey string
-				if haveLast && rng.Float64() < cfg.dup {
+				switch {
+				case haveLast && rng.Float64() < cfg.dup:
 					body, idemKey = lastBody, lastKey
-				} else {
+				case rng.Float64() < cfg.conflict:
+					if target, ok := recent.pick(rng); ok {
+						idemKey = target.idemKey
+						body = withConflictingPayload(target.body)
+						break
+					}
+					fallthrough
+				default:
 					wIdx := 0
 					if len(wallets) > 1 && rng.Float64() >= cfg.hot {
 						wIdx = 1 + rng.IntN(len(wallets)-1)
@@ -239,6 +261,7 @@ func runLoad(cfg flags, providerTok string, wallets []wallet) [][]opResult {
 						Money: money{Amount: betAmount, Currency: currency},
 					}
 					lastBody, lastKey, haveLast = body, idemKey, true
+					recent.add(recentOp{idemKey: idemKey, body: body})
 				}
 
 				start := time.Now()
@@ -252,35 +275,46 @@ func runLoad(cfg flags, providerTok string, wallets []wallet) [][]opResult {
 	return results
 }
 
-// waitOutboxDrained polls until no outbox row is left unpublished and un-dead, or until timeout.
-func waitOutboxDrained(ctx context.Context, pool *pgxpool.Pool, timeout time.Duration) (drained bool, remaining int, err error) {
+// waitOutboxDrained polls the global (partial-index-backed) unpublished count until it reaches
+// zero or until timeout. With a fresh stack per run (docs/CARGA.md's reproducible commands), this
+// is equivalent to scoping by the load's own occurred_at window, at a fraction of the query cost.
+func waitOutboxDrained(ctx context.Context, pool *pgxpool.Pool, timeout time.Duration) (drained bool, err error) {
 	deadline := time.Now().Add(timeout)
 	for {
 		var n int
 		if err := pool.QueryRow(ctx, `SELECT count(*) FROM outbox_events WHERE published_at IS NULL AND dead_at IS NULL`).Scan(&n); err != nil {
-			return false, 0, err
+			return false, err
 		}
 		if n == 0 {
-			return true, 0, nil
+			return true, nil
 		}
 		if time.Now().After(deadline) {
-			return false, n, nil
+			return false, nil
 		}
 		time.Sleep(outboxDrainPoll)
 	}
 }
 
-// outboxDelays reads p50/p95/p99 of the publish delay for events occurred since the load started.
-// Each percentile is nil when the aggregate had no matching rows (e.g. nothing occurred yet).
-func outboxDelays(ctx context.Context, pool *pgxpool.Pool, since time.Time) (outboxDelayReport, error) {
+// measureOutbox reads, for events that occurred since the load started: how many exist, how many
+// were published, and the p50/p95/p99 publish delay. percentile_cont ignores NULL inputs, so rows
+// still pending (published_at IS NULL) are excluded from the percentiles by construction - the
+// AND published_at IS NOT NULL below is redundant but documents that on purpose. Callers must
+// compare published against total: if they differ, the percentiles are right-censored and the
+// real tail is longer than what they show.
+func measureOutbox(ctx context.Context, pool *pgxpool.Pool, since time.Time) (outboxReport, error) {
+	var rep outboxReport
+	if err := pool.QueryRow(ctx, `SELECT count(*), count(published_at) FROM outbox_events WHERE occurred_at >= $1`,
+		since).Scan(&rep.total, &rep.published); err != nil {
+		return outboxReport{}, err
+	}
 	var seconds []*float64
 	err := pool.QueryRow(ctx, `SELECT percentile_cont(ARRAY[0.5,0.95,0.99]) WITHIN GROUP (ORDER BY extract(epoch FROM published_at - occurred_at))
-		FROM outbox_events WHERE occurred_at >= $1`, since).Scan(&seconds)
+		FROM outbox_events WHERE occurred_at >= $1 AND published_at IS NOT NULL`, since).Scan(&seconds)
 	if err != nil {
-		return outboxDelayReport{}, err
+		return outboxReport{}, err
 	}
-	if len(seconds) != 3 {
-		return outboxDelayReport{}, nil
+	if len(seconds) == 3 {
+		rep.p50, rep.p95, rep.p99 = seconds[0], seconds[1], seconds[2]
 	}
-	return outboxDelayReport{p50: seconds[0], p95: seconds[1], p99: seconds[2]}, nil
+	return rep, nil
 }
