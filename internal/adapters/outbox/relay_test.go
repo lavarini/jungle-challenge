@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 )
@@ -17,6 +18,7 @@ type call struct {
 }
 
 type fakeStore struct {
+	mu      sync.Mutex // Ack, Retry and Dead run concurrently under Config.Concurrency
 	msgs    []Message
 	calls   []call
 	applied bool
@@ -29,14 +31,20 @@ func (f *fakeStore) ClaimHeads(_ context.Context, _ time.Time, _ int, _ string, 
 	return m, nil
 }
 func (f *fakeStore) Ack(_ context.Context, seq int64, claim string, _ time.Time) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, call{op: "ack", seq: seq, claim: claim})
 	return f.applied, f.err
 }
 func (f *fakeStore) Retry(_ context.Context, seq int64, claim string, next time.Time, _ string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, call{op: "retry", seq: seq, claim: claim, next: next})
 	return f.applied, f.err
 }
 func (f *fakeStore) Dead(_ context.Context, seq int64, claim string, _ time.Time, _ string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, call{op: "dead", seq: seq, claim: claim})
 	return f.applied, f.err
 }
@@ -286,5 +294,61 @@ func TestInterruptedPublishIsNotObserved(t *testing.T) {
 	}
 	if o.publishes != 0 {
 		t.Fatalf("publish durations observed = %d, want 0", o.publishes)
+	}
+}
+
+// barrierPublisher lets a publish return only once `want` publishes are in
+// flight at the same time, so it completes only under concurrent delivery.
+type barrierPublisher struct {
+	want    int
+	mu      sync.Mutex
+	arrived int
+	release chan struct{}
+}
+
+func (p *barrierPublisher) Publish(ctx context.Context, _ Message) error {
+	p.mu.Lock()
+	p.arrived++
+	if p.arrived == p.want {
+		close(p.release)
+	}
+	p.mu.Unlock()
+	select {
+	case <-p.release:
+		return nil
+	case <-time.After(2 * time.Second):
+		return errors.New("publishes were not concurrent")
+	}
+}
+
+// Heads of different partitions are independent, so one tick publishes them
+// concurrently up to Config.Concurrency: a tick costs about one broker round
+// trip instead of one per partition, and each partition still has at most
+// one event in flight.
+func TestTickPublishesHeadsConcurrently(t *testing.T) {
+	const heads = 4
+	var msgs []Message
+	for i := int64(1); i <= heads; i++ {
+		msgs = append(msgs, Message{Seq: i, PartitionKey: string(rune('a' + i)), Attempts: 1})
+	}
+	store := &fakeStore{applied: true, msgs: msgs}
+	pub := &barrierPublisher{want: heads, release: make(chan struct{})}
+	r := New(store, pub, Config{Interval: time.Millisecond, Lease: 30 * time.Second, Batch: 10, Concurrency: heads,
+		MaxPermanentAttempts: 3, InitialBackoff: time.Second, MaxBackoff: time.Minute, Jitter: identityJitter},
+		func() time.Time { return t0 }, func() string { return "claim-1" }, quietLog())
+
+	n, err := r.Tick(context.Background())
+	if err != nil || n != heads {
+		t.Fatalf("Tick = %d, %v", n, err)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if len(store.calls) != heads {
+		t.Fatalf("calls = %+v, want %d", store.calls, heads)
+	}
+	for _, c := range store.calls {
+		if c.op != "ack" {
+			t.Fatalf("call %+v: every head must be published and acked within the tick", c)
+		}
 	}
 }

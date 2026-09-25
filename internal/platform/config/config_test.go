@@ -48,11 +48,12 @@ func TestLoadReportsEveryMissingVariable(t *testing.T) {
 
 func TestLoadRejectsInvalidValues(t *testing.T) {
 	cases := map[string]string{
-		"WAGERD_ROLE":          "everything",
-		"DB_LOCK_TIMEOUT":      "soon",
-		"DB_MAX_CONNS":         "-1",
-		"SQS_MAX_RECEIVES":     "0",
-		"HTTP_REQUEST_TIMEOUT": "0s",
+		"WAGERD_ROLE":                "everything",
+		"DB_LOCK_TIMEOUT":            "soon",
+		"DB_MAX_CONNS":               "-1",
+		"SQS_MAX_RECEIVES":           "0",
+		"HTTP_REQUEST_TIMEOUT":       "0s",
+		"OUTBOX_PUBLISH_CONCURRENCY": "0",
 	}
 	for k, v := range cases {
 		if _, err := Load(env(map[string]string{k: v})); err == nil {
@@ -107,5 +108,19 @@ func TestParseSenders(t *testing.T) {
 	}
 	if _, err := Load(env(map[string]string{"WAGERD_ROLE": "consumer", "SQS_SENDER_PROVIDERS": ""})); err == nil {
 		t.Fatal("consumer without senders accepted")
+	}
+}
+
+func TestOutboxPublishConcurrency(t *testing.T) {
+	c, err := Load(env(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Workers.OutboxConcurrency != 16 {
+		t.Fatalf("default OUTBOX_PUBLISH_CONCURRENCY = %d, want 16", c.Workers.OutboxConcurrency)
+	}
+	c, err = Load(env(map[string]string{"OUTBOX_PUBLISH_CONCURRENCY": "1"}))
+	if err != nil || c.Workers.OutboxConcurrency != 1 {
+		t.Fatalf("OUTBOX_PUBLISH_CONCURRENCY=1: %d, %v", c.Workers.OutboxConcurrency, err)
 	}
 }

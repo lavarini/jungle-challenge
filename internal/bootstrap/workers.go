@@ -71,7 +71,7 @@ func runOutboxRelay(lc fx.Lifecycle, d *drain, cfg config.Config, pool *pgxpool.
 	}
 	r := outbox.New(postgres.NewOutboxStore(pool), snsout.New(client, cfg.AWS.EventsTopicARN), outbox.Config{
 		Interval: cfg.Workers.PollInterval, Lease: cfg.Workers.Lease, Batch: cfg.Workers.Batch,
-		MaxPermanentAttempts: 5, InitialBackoff: time.Second, MaxBackoff: 5 * time.Minute,
+		Concurrency: cfg.Workers.OutboxConcurrency, MaxPermanentAttempts: 5, InitialBackoff: time.Second, MaxBackoff: 5 * time.Minute,
 		Observer: metrics.RelayObserver{M: m},
 	}, clock.Now, uuid.NewString, l)
 	runLoop(lc, d, "outbox-relay", r.Loop)

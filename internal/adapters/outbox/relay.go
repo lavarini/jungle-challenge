@@ -46,6 +46,10 @@ type Config struct {
 	MaxPermanentAttempts int
 	InitialBackoff       time.Duration
 	MaxBackoff           time.Duration
+	// Concurrency bounds how many claimed heads one tick publishes at the
+	// same time. Heads belong to distinct partitions, so this never puts two
+	// events of one partition in flight; 0 or 1 publishes serially.
+	Concurrency int
 	// Jitter stretches the backoff to spread retries (ADR 0014); nil
 	// defaults to app.UpToTwentyPercent.
 	Jitter func(time.Duration) time.Duration
@@ -118,7 +122,10 @@ func (r *Relay) Loop(run, work context.Context) {
 	}
 }
 
-// Tick claims a batch of partition heads and delivers them in seq order.
+// Tick claims a batch of partition heads and delivers them, starting them in
+// seq order, up to Config.Concurrency at a time. Each head is the only
+// claimable event of its partition, so concurrent delivery keeps the order
+// within every partition; it returns once every started delivery is done.
 func (r *Relay) Tick(ctx context.Context) (int, error) {
 	now := r.now()
 	claim := r.newID()
@@ -128,15 +135,24 @@ func (r *Relay) Tick(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	sort.Slice(msgs, func(i, j int) bool { return msgs[i].Seq < msgs[j].Seq })
+	slots := make(chan struct{}, max(r.cfg.Concurrency, 1))
+	var wg sync.WaitGroup
 	for _, m := range msgs {
+		slots <- struct{}{}
 		// Once ctx is cancelled, further publishes would just time out one
 		// by one; stop and let the leases expire instead of logging a burst
 		// of misleading "publish failed" warnings.
 		if ctx.Err() != nil {
+			<-slots
 			break
 		}
-		r.deliver(ctx, m, claim, leaseUntil)
+		wg.Add(1)
+		go func() {
+			defer func() { <-slots; wg.Done() }()
+			r.deliver(ctx, m, claim, leaseUntil)
+		}()
 	}
+	wg.Wait()
 	return len(msgs), nil
 }
 

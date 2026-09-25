@@ -76,6 +76,9 @@ type WorkersConfig struct {
 	PollInterval time.Duration
 	Lease        time.Duration
 	Batch        int
+	// OutboxConcurrency bounds the partition heads one relay tick publishes
+	// at the same time (ADR 0014, Revisão).
+	OutboxConcurrency int
 }
 
 type Config struct {
@@ -175,6 +178,11 @@ func Load(getenv func(string) string) (Config, error) {
 		errs = append(errs, errors.New("WORKER_BATCH must be a positive integer"))
 	}
 	c.Workers.Batch = batch
+	concurrency, err := strconv.Atoi(str("OUTBOX_PUBLISH_CONCURRENCY", "16"))
+	if err != nil || concurrency < 1 {
+		errs = append(errs, errors.New("OUTBOX_PUBLISH_CONCURRENCY must be a positive integer"))
+	}
+	c.Workers.OutboxConcurrency = concurrency
 	if c.Reference.MaxBackoff < c.Reference.InitialBackoff {
 		errs = append(errs, errors.New("REFERENCE_BACKOFF_MAX must be >= REFERENCE_BACKOFF_INITIAL"))
 	}
