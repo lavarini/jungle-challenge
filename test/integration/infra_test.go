@@ -21,9 +21,10 @@ import (
 	"github.com/lavarini/backend-challenge-go/test/testenv"
 )
 
-// SPIKE (ADR 0012): SNS FIFO fans out to a subscribed SQS FIFO queue with raw
-// delivery, keeps message attributes and deduplicates by MessageDeduplicationId.
-func TestSpikeSNSFIFOFanOutAndDeduplication(t *testing.T) {
+// TestInfraSNSFIFOFanOutAndDeduplication proves SNS FIFO fans out to a
+// subscribed SQS FIFO queue with raw delivery, keeps message attributes and
+// deduplicates by MessageDeduplicationId (ADR 0012).
+func TestInfraSNSFIFOFanOutAndDeduplication(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
@@ -98,9 +99,10 @@ func TestSpikeSNSFIFOFanOutAndDeduplication(t *testing.T) {
 	}
 }
 
-// SPIKE (ADR 0016): SenderId reflects the sender's credential, so the consumer
-// can bind a broker identity to a provider.
-func TestSpikeSQSSenderIDReflectsCredential(t *testing.T) {
+// TestInfraSQSSenderIDReflectsCredential proves SenderId reflects the
+// sender's credential, so the consumer can bind a broker identity to a
+// provider (ADR 0016).
+func TestInfraSQSSenderIDReflectsCredential(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
@@ -117,7 +119,7 @@ func TestSpikeSQSSenderIDReflectsCredential(t *testing.T) {
 		_, err = client.SendMessage(ctx, &sqs.SendMessageInput{
 			QueueUrl:               aws.String(queueURL),
 			MessageBody:            aws.String(marker + "|" + key),
-			MessageGroupId:         aws.String("spike-" + key),
+			MessageGroupId:         aws.String("infra-" + key),
 			MessageDeduplicationId: aws.String(marker + key),
 		})
 		if err != nil {
@@ -158,8 +160,9 @@ func TestSpikeSQSSenderIDReflectsCredential(t *testing.T) {
 	}
 }
 
-// SPIKE (ADR 0015): Keycloak issues tokens with audience, roles and provider_id.
-func TestSpikeKeycloakTokenClaims(t *testing.T) {
+// TestInfraKeycloakTokenClaims proves Keycloak issues tokens with audience,
+// roles and provider_id (ADR 0015).
+func TestInfraKeycloakTokenClaims(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 

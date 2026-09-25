@@ -37,7 +37,9 @@ type Metrics struct {
 	InvariantViolations       *prometheus.CounterVec
 	ReconciliationDivergences prometheus.Counter
 
-	// Day-2 amendments (ADR 0011, ADR 0013, ADR 0014).
+	// Failure and contention signals: invariant violations reaching FAILED,
+	// pendencies close to their deadline, lock contention on the reference
+	// worker, and outbox claim/publish bookkeeping (ADR 0011, ADR 0013, ADR 0014).
 	ReferenceFailed           prometheus.Counter
 	PendingNearDeadline       prometheus.Gauge
 	ReferenceLockConflicts    *prometheus.CounterVec

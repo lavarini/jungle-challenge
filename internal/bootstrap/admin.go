@@ -19,7 +19,7 @@ import (
 
 // runAdminServer serves /metrics, /debug/pprof and the health endpoints on a
 // separate listener that the Compose file never publishes (ADR 0015). Worker-
-// only roles run no public HTTP server, so their orchestrator probes
+// only roles run no public HTTP server, so the container platform probes
 // readiness here.
 //
 // Its stop belongs to the drain, after every other component (addLast):
