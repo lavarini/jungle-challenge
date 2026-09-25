@@ -244,7 +244,7 @@ func TestSenderBoundToAnotherProviderIsRejected(t *testing.T) {
 	}
 }
 
-// A message cut off by shutdown never really failed: spec §4 returns it to the
+// A message cut off by shutdown never really failed: design.md §4 returns it to the
 // queue at once (visibility 0), without backoff and without spending its
 // retry budget, even when its receive count is already at MaxReceives.
 func TestMessageInterruptedByShutdownIsReleasedImmediately(t *testing.T) {

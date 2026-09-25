@@ -33,8 +33,8 @@ type iamPolicy struct {
 }
 
 // expectedIAMActions is the minimal action set per process role (ADR 0016,
-// spec section 5). Every role runs /health/ready, which probes the input
-// queue with sqs:GetQueueAttributes (spec section 7); beyond that, api and
+// design.md §5). Every role runs /health/ready, which probes the input
+// queue with sqs:GetQueueAttributes (design.md §7); beyond that, api and
 // reference-worker call no AWS API.
 var expectedIAMActions = map[string][]string{
 	"api": {"sqs:GetQueueAttributes"},

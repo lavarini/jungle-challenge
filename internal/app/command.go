@@ -67,7 +67,7 @@ func (c SubmitCommand) validate() error {
 		return fmt.Errorf("%w: referenceExternalTransactionId exceeds %d characters", ErrInvalidInput, MaxFieldLength)
 	}
 	// Only kinds whose rule reads a reference may carry one: REFUND and
-	// ROLLBACK require it, WIN may name its BET (spec §3). On BET or LOSS it
+	// ROLLBACK require it, WIN may name its BET (design.md §3). On BET or LOSS it
 	// is a correctable input error rather than a reference to wait for.
 	if c.ReferenceExternalTransactionID != "" && (c.Kind == wagering.Bet || c.Kind == wagering.Loss) {
 		return fmt.Errorf("%w: referenceExternalTransactionId is not allowed for %s", ErrInvalidInput, c.Kind)

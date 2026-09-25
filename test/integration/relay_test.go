@@ -214,9 +214,10 @@ func TestClaimHeadsRechecksPublicationUnderConcurrentAck(t *testing.T) {
 	// slowClaimSQL is ClaimHeads' own query with one test-only stage spliced
 	// in between the heads snapshot and the due lock: `slowed` pg_sleeps
 	// before `due` runs, widening the reclaim race deterministically. The
-	// CTE name `due` joins against is the only difference from
-	// outbox_store.claimHeadsSQL; HeadsWith and DueRecheck are the same Go
-	// constants the production query uses, so this cannot drift from it.
+	// CTE name `due` filters by (`slowed` instead of `heads`) is the only
+	// difference from outbox_store.claimHeadsSQL; HeadsWith and DueRecheck
+	// are the same Go constants the production query uses, so this cannot
+	// drift from it.
 	slowClaimSQL := postgres.HeadsWith + `, slowed AS (
 			SELECT seq FROM heads, pg_sleep(0.5)
 		), due AS (

@@ -15,7 +15,7 @@ import (
 )
 
 // drain owns the shutdown of everything that serves traffic or does work
-// (spec §4 and §7). Fx stops hooks one by one on a shared deadline, so a hook
+// (design.md §4 and §7). Fx stops hooks one by one on a shared deadline, so a hook
 // per component would let the first slow one starve the rest and flip
 // readiness last. Instead components register here, and one stop hook:
 //

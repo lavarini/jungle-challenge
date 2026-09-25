@@ -94,8 +94,8 @@ docker run --rm --network "container:$(docker compose ps -q app)" curlimages/cur
   localhost:9090/metrics | grep -E '^(wager|outbox|sqs)_'
 ```
 
-As métricas seguem a seção 7 da spec, sem identificadores em rótulos. O
-[RUNBOOK](docs/RUNBOOK.md) liga cada alerta a um procedimento.
+As métricas seguem o [desenho da solução](docs/design.md), seção 7, sem identificadores em
+rótulos. O [RUNBOOK](docs/RUNBOOK.md) liga cada alerta a um procedimento.
 
 ## Exemplos de chamadas
 

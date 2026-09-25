@@ -136,11 +136,10 @@ func TestReferenceMismatchAndRejectedReference(t *testing.T) {
 // The initial backoff is 1h, not DefaultReferencePolicy's 1s: under load, or
 // with clock drift in the Docker VM, more than 1s can pass between submit and
 // the "still waiting" assertion below, which would make the assertion flake
-// against the container's now() even though nothing was actually woken
-// A 1h backoff makes "still waiting"
-// unambiguous, and comparing the wake against the recorded next_attempt_at
-// instead of wall-clock now() keeps the assertion meaningful regardless of
-// how much time elapses around it.
+// against the container's now() even though nothing was actually woken. A 1h
+// backoff makes "still waiting" unambiguous, and comparing the wake against
+// the recorded next_attempt_at instead of wall-clock now() keeps the
+// assertion meaningful regardless of how much time elapses around it.
 func TestRefundBeforeBetWaitsAndIsWokenByTheBet(t *testing.T) {
 	s := newStack(t)
 	ctx := context.Background()

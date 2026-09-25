@@ -62,7 +62,7 @@ func sendSQSDuplicate(accessKey, walletID, messageID string, data map[string]any
 	return err
 }
 
-// The spec's section 8 scenario: 50 sends of the same operation (same
+// The required concurrency scenario: 50 sends of the same operation (same
 // idempotency key and body), half over HTTP and half over SQS, fired in
 // parallel across the three processes. One debit, one transaction row, one
 // ledger row, the baseline's worth of outbox events, a reconciled wallet, and

@@ -38,7 +38,7 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-// writeError maps app errors to the HTTP contract (spec, section 3).
+// writeError maps app errors to the HTTP contract (design.md §3).
 func (a *api) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	var keyMismatch *app.KeyMismatchError
 	switch {

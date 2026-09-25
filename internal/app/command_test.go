@@ -54,7 +54,7 @@ func TestSubmitCommandValidatesInbox(t *testing.T) {
 }
 
 // Only kinds whose rule reads a reference may carry one: REFUND and ROLLBACK
-// require it, WIN may name its BET (spec §3). BET and LOSS never use one, so a
+// require it, WIN may name its BET (design.md §3). BET and LOSS never use one, so a
 // reference there is a correctable input error, not a 24h pending operation.
 func TestOnlyReferenceKindsMayCarryAReference(t *testing.T) {
 	for _, k := range []wagering.Kind{wagering.Win, wagering.Refund, wagering.Rollback} {

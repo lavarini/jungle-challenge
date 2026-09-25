@@ -1,5 +1,5 @@
 // Package metrics owns the Prometheus registry. Labels never carry wallet,
-// provider, transaction or event ids (spec, section 7): every label value
+// provider, transaction or event ids (design.md §7): every label value
 // here comes from a closed set (kinds, statuses, sources, reasons, results).
 package metrics
 
@@ -21,7 +21,7 @@ const SourceResolver = "resolver"
 type Metrics struct {
 	registry *prometheus.Registry
 
-	// Spec, section 7.
+	// design.md §7.
 	Transactions              *prometheus.CounterVec
 	Replays                   *prometheus.CounterVec
 	InboxDuplicates           prometheus.Counter

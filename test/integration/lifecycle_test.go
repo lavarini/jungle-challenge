@@ -81,7 +81,7 @@ func TestFxLifecycleStartsServesAndStopsCleanly(t *testing.T) {
 		t.Fatalf("ready = %d", resp.StatusCode)
 	}
 
-	// The admin port serves metrics (spec §7 names, preset at zero) and
+	// The admin port serves metrics (design.md §7 names, preset at zero) and
 	// readiness for worker-only roles.
 	admin := vars["ADMIN_ADDR"]
 	body := get(t, fmt.Sprintf("http://%s/metrics", admin), http.StatusOK)

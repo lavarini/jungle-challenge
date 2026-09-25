@@ -22,9 +22,8 @@ const maxErrorLength = 1000
 // replaced was rescanned once per pending row when the statistics still
 // described an empty outbox, making the claim quadratic in the backlog
 // (statement timeouts under load). Exported so tests can compose the exact
-// production query around an injected delay instead of hand-copying it
-// a query built from these
-// fragments can't silently drift from ClaimHeads.
+// production query around an injected delay instead of hand-copying it: a
+// query built from these fragments can't silently drift from ClaimHeads.
 const HeadsWith = `WITH RECURSIVE heads(partition_key, seq) AS (
 		(SELECT partition_key, seq FROM outbox_events
 		WHERE published_at IS NULL AND dead_at IS NULL

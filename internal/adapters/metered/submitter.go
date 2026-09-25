@@ -1,6 +1,6 @@
 // Package metered records metrics around use cases, keeping app free of
 // instrumentation. Label values come only from closed sets (kind, status,
-// source, reason): never ids (spec, section 7).
+// source, reason): never ids (design.md §7).
 package metered
 
 import (

@@ -161,7 +161,7 @@ func (c *Consumer) handle(ctx context.Context, m types.Message) bool {
 	if permanent {
 		return c.deadLetter(m, env.MessageID, code, err)
 	}
-	// Shutdown cut the handling short (spec §4): the message never really
+	// Shutdown cut the handling short (design.md §4): the message never really
 	// failed, so it goes back at once and does not spend its retry budget.
 	// Any non-permanent failure once work is cancelled counts, not only one
 	// carrying context.Canceled: a statement the server cancelled (57014)

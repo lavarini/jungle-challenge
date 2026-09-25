@@ -7,7 +7,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
-// Spec, section 7: exact names and label sets. The amendment metrics follow.
+// design.md, §7: exact names and label sets. The failure and contention metrics follow.
 var want = map[string][]string{
 	"wager_transactions_total":         {"kind", "source", "status"},
 	"wager_idempotent_replays_total":   {"source"},

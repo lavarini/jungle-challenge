@@ -2,7 +2,7 @@
 
 Uma política por papel (`WAGERD_ROLE`), com o mínimo de ações que o código de
 cada papel realmente chama na SDK da AWS. Segue [ADR 0016](../../docs/adr/0016-credenciais-do-broker-e-vinculo-do-remetente.md)
-e a seção 5 da spec de arquitetura.
+e o [desenho da solução](../../docs/design.md), seção 5.
 
 | Arquivo | Papel | Ações | Recurso |
 |---|---|---|---|
@@ -60,6 +60,7 @@ equivalente) em vez de copiar os JSONs literalmente.
 - **Sem wildcards.** Nenhuma política aqui usa `"*"` em `Action` ou em
   `Resource`; o teste de arquitetura falha se algum arquivo introduzir um.
 - **Prontidão.** Todo papel responde `/health/ready`, que verifica o Postgres e
-  a fila de entrada com `sqs:GetQueueAttributes` (seção 7 da spec). Por isso as
+  a fila de entrada com `sqs:GetQueueAttributes` ([desenho da solução](../../docs/design.md),
+  seção 7). Por isso as
   quatro políticas têm a declaração `ReadinessProbe`, restrita a essa ação e a
   essa fila. É a única ação AWS de `api` e `reference-worker`.

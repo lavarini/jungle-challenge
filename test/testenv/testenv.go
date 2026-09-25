@@ -218,8 +218,7 @@ func (e *Env) MarkAsTemplate(ctx context.Context) error {
 // This exists because some integration suites claim rows globally by design
 // (the outbox relay's ClaimHeads, the pending resolver's Claim): on a
 // database shared across the whole run, an earlier test's leftover due rows
-// make their claims and assertions order-dependent
-// 
+// make their claims and assertions order-dependent.
 //
 // t.Cleanup drops the database, WITH (FORCE) so open connections don't block
 // it. Register any pool's Close as a cleanup after calling NewDatabase:
