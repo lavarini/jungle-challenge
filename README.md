@@ -92,3 +92,100 @@ docker run --rm --network "container:$(docker compose ps -q app)" curlimages/cur
 
 As métricas seguem a seção 7 da spec, sem identificadores em rótulos. O
 [RUNBOOK](docs/RUNBOOK.md) liga cada alerta a um procedimento.
+
+## Exemplos de chamadas
+
+Executados contra `docker compose up --build`, com tokens reais do Keycloak local. Corpos e
+campos completos estão em [`docs/openapi.yaml`](docs/openapi.yaml).
+
+```sh
+KC=http://localhost:8081/realms/wagering
+tok() { curl -fsS -X POST "$KC/protocol/openid-connect/token" -d grant_type=client_credentials \
+  -d client_id="$1" -d client_secret="$2" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p'; }
+INTERNAL=$(tok wallet-internal wallet-internal-dev-secret)
+PROVIDER=$(tok provider-a provider-a-dev-secret)
+PLAYER=$(uuidgen | tr 'A-Z' 'a-z')
+```
+
+Abrir carteira (`201`; guarda o `id` em `WALLET` para os exemplos seguintes):
+
+```sh
+WALLET=$(curl -sS -X POST localhost:8080/wallets -H "Authorization: Bearer $INTERNAL" -H 'Content-Type: application/json' \
+  -d "{\"playerId\":\"$PLAYER\",\"initialBalance\":{\"amount\":\"1000.00\",\"currency\":\"BRL\"}}" \
+  | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+```
+
+Consultar a carteira (`200`):
+
+```sh
+curl -sS localhost:8080/wallets/$WALLET -H "Authorization: Bearer $INTERNAL"
+```
+
+Enviar uma aposta com chave de idempotência (`201` na primeira vez, `idempotentReplay: false`;
+guarda o `transactionId` em `TXID`):
+
+```sh
+EXT="tx-$(uuidgen | tr 'A-Z' 'a-z')"
+TXID=$(curl -sS -X POST localhost:8080/wagering/transactions -H "Authorization: Bearer $PROVIDER" \
+  -H "Content-Type: application/json" -H "Idempotency-Key: provider-a:$EXT" \
+  -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"$EXT\",\"playerId\":\"$PLAYER\",\"walletId\":\"$WALLET\",\"roundId\":\"round-1\",\"gameId\":\"fortune-chimp\",\"kind\":\"BET\",\"money\":{\"amount\":\"25.00\",\"currency\":\"BRL\"}}" \
+  | sed -n 's/.*"transactionId":"\([^"]*\)".*/\1/p')
+```
+
+O mesmo comando, repetido com a mesma `Idempotency-Key` e o mesmo corpo (replay, `200`, mesmo
+`transactionId`, `idempotentReplay: true`, sem debitar de novo):
+
+```sh
+curl -sS -X POST localhost:8080/wagering/transactions -H "Authorization: Bearer $PROVIDER" \
+  -H "Content-Type: application/json" -H "Idempotency-Key: provider-a:$EXT" \
+  -d "{\"providerId\":\"provider-a\",\"externalTransactionId\":\"$EXT\",\"playerId\":\"$PLAYER\",\"walletId\":\"$WALLET\",\"roundId\":\"round-1\",\"gameId\":\"fortune-chimp\",\"kind\":\"BET\",\"money\":{\"amount\":\"25.00\",\"currency\":\"BRL\"}}"
+```
+
+Consultar a transação por id (`200`):
+
+```sh
+curl -sS localhost:8080/wagering/transactions/$TXID -H "Authorization: Bearer $PROVIDER"
+```
+
+Consultar pelo id externo do provedor (`200`):
+
+```sh
+curl -sS "localhost:8080/providers/provider-a/wagering/transactions/$EXT" -H "Authorization: Bearer $PROVIDER"
+```
+
+Ledger paginado por cursor (`200`):
+
+```sh
+curl -sS "localhost:8080/wallets/$WALLET/ledger?limit=10" -H "Authorization: Bearer $INTERNAL"
+```
+
+Reconciliação (`200`, `consistent: true`, sem alterar o saldo):
+
+```sh
+curl -sS -X POST "localhost:8080/wallets/$WALLET/reconciliation" -H "Authorization: Bearer $INTERNAL"
+```
+
+Provedor tentando abrir carteira, operação restrita ao papel `internal` (`403`):
+
+```sh
+curl -sS -X POST localhost:8080/wallets -H "Authorization: Bearer $PROVIDER" -H 'Content-Type: application/json' \
+  -d "{\"playerId\":\"$PLAYER\",\"initialBalance\":{\"amount\":\"1000.00\",\"currency\":\"BRL\"}}"
+```
+
+## Testes: dependências e build tags
+
+| Comando | Exige Docker | O que roda |
+|---|---|---|
+| `go test ./...` | não | unitários |
+| `go test -race ./...` | não | unitários com `-race` |
+| `go test -race -tags=integration -count=1 -timeout=15m ./test/integration/...` | sim | PostgreSQL, Keycloak e LocalStack reais via testcontainers, subidos pelo próprio teste |
+| `go test -tags=e2e -count=1 -timeout=20m ./test/e2e/` | sim | três processos `wagerd` compilados pelo teste, contra a mesma infraestrutura |
+| `go test -tags=e2e -count=1 -timeout=20m ./test/e2e/crash/...` | sim | quedas abruptas, `SIGKILL`, `SIGTERM` |
+| `go test -race -tags=failpoint ./internal/platform/failpoint/` | não | testes do próprio pacote de failpoints |
+| `docker compose --profile multi up --build` | sim | três instâncias manuais, para inspeção interativa |
+
+Os comandos correspondem um a um aos alvos do `Makefile` (`make test`, `make test-race`,
+`make test-integration`, `make test-e2e`, `make test-crash`, `make test-failpoint`, `make up-multi`).
+
+Não rode duas suítes que exigem Docker ao mesmo tempo: os testes de integração e e2e sobem seus
+próprios containers via testcontainers e disputam os mesmos recursos.
