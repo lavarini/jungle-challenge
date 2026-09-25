@@ -352,3 +352,48 @@ func TestTickPublishesHeadsConcurrently(t *testing.T) {
 		}
 	}
 }
+
+// drainingStore hands out one head per claim, like a single hot partition
+// whose next event becomes the head as soon as the previous one is acked.
+type drainingStore struct {
+	fakeStore
+	left int
+}
+
+func (s *drainingStore) ClaimHeads(_ context.Context, _ time.Time, _ int, _ string, _ time.Time) ([]Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.left == 0 {
+		return nil, nil
+	}
+	s.left--
+	return []Message{{Seq: int64(100 - s.left), PartitionKey: "hot", Attempts: 1}}, nil
+}
+
+func (s *drainingStore) acks() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.calls)
+}
+
+// A tick that delivered anything is followed by another one right away, even
+// when the batch was not full: a backlog confined to a few partitions (one
+// hot wallet) must drain at broker speed, not at one event per poll interval.
+func TestLoopClaimsAgainRightAfterAPartialBatch(t *testing.T) {
+	store := &drainingStore{fakeStore: fakeStore{applied: true}, left: 5}
+	r := New(store, fakePublisher{}, Config{Interval: time.Hour, Lease: 30 * time.Second, Batch: 10,
+		MaxPermanentAttempts: 3, InitialBackoff: time.Second, MaxBackoff: time.Minute, Jitter: identityJitter},
+		time.Now, func() string { return "claim-1" }, quietLog())
+	run, stop := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); r.Loop(run, context.Background()) }()
+	defer func() { stop(); <-done }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for store.acks() < 5 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := store.acks(); n != 5 {
+		t.Fatalf("acked %d of 5 events within 2s; the loop waited a poll interval after a partial batch", n)
+	}
+}

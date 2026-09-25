@@ -111,7 +111,12 @@ func (r *Relay) Loop(run, work context.Context) {
 		if err != nil && work.Err() == nil {
 			r.log.WarnContext(work, "outbox claim failed", "error", err.Error(), "class", "transient")
 		}
-		if n == r.cfg.Batch {
+		// Delivering anything means the next head of those partitions may
+		// already be due: claim again at once and wait for the interval
+		// only when a claim comes back empty. Waiting after every partial
+		// batch capped a backlog confined to a few partitions (one hot
+		// wallet) at one event per interval per relay.
+		if n > 0 {
 			continue
 		}
 		select {
