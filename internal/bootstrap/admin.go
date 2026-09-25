@@ -2,7 +2,6 @@ package bootstrap
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net"
@@ -60,24 +59,7 @@ func adminMux(m *metrics.Metrics, r *health.Readiness, l *slog.Logger) *http.Ser
 	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-	mux.HandleFunc("GET /health/live", func(w http.ResponseWriter, _ *http.Request) {
-		writeStatus(w, http.StatusOK, "ok")
-	})
-	mux.HandleFunc("GET /health/ready", func(w http.ResponseWriter, req *http.Request) {
-		ctx, cancel := context.WithTimeout(req.Context(), 3*time.Second)
-		defer cancel()
-		if err := r.Ready(ctx); err != nil {
-			l.WarnContext(req.Context(), "not ready", "error", err.Error())
-			writeStatus(w, http.StatusServiceUnavailable, "unavailable")
-			return
-		}
-		writeStatus(w, http.StatusOK, "ok")
-	})
+	mux.Handle("GET /health/live", health.LiveHandler())
+	mux.Handle("GET /health/ready", health.ReadyHandler(r, l))
 	return mux
-}
-
-func writeStatus(w http.ResponseWriter, code int, status string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": status})
 }

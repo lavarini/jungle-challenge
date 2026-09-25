@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/lavarini/backend-challenge-go/internal/app"
+	"github.com/lavarini/backend-challenge-go/internal/platform/health"
 	"github.com/lavarini/backend-challenge-go/internal/wagering"
 )
 
@@ -77,8 +78,8 @@ func NewHandler(d Deps) http.Handler {
 		readiness: d.Readiness, log: d.Logger,
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health/live", a.live)
-	mux.HandleFunc("GET /health/ready", a.ready)
+	mux.Handle("GET /health/live", health.LiveHandler())
+	mux.Handle("GET /health/ready", health.ReadyHandler(a.readiness, a.log))
 	mux.Handle("POST /wallets", a.require(app.RoleInternal, a.openWallet))
 	mux.Handle("GET /wallets/{walletId}", a.require(app.RoleInternal, a.getWallet))
 	mux.Handle("POST /wagering/transactions", a.require(app.RoleProvider, a.submitWager))
