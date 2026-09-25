@@ -297,7 +297,11 @@ func TestMigrationsUpDownUp(t *testing.T) {
 	if _, err := super.Exec(ctx, fmt.Sprintf(`CREATE DATABASE %s OWNER wager_migrator`, name)); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = super.Exec(context.Background(), fmt.Sprintf(`DROP DATABASE %s WITH (FORCE)`, name)) })
+	t.Cleanup(func() {
+		if _, err := super.Exec(context.Background(), fmt.Sprintf(`DROP DATABASE %s WITH (FORCE)`, name)); err != nil {
+			t.Logf("testenv: drop database %s: %v", name, err)
+		}
+	})
 
 	dsn := fmt.Sprintf("postgres://wager_migrator:migrator-dev-only@%s:%s/%s?sslmode=disable", env.Postgres.Host, env.Postgres.Port, name)
 	for _, dir := range []string{"up", "down", "up"} {

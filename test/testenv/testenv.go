@@ -244,10 +244,13 @@ func (e *Env) NewDatabase(ctx context.Context, t testing.TB) Postgres {
 		defer cancel()
 		conn, err := pgx.Connect(dropCtx, e.Postgres.SuperDSN)
 		if err != nil {
+			t.Logf("testenv: drop database %s: connect: %v", name, err)
 			return
 		}
 		defer conn.Close(dropCtx)
-		_, _ = conn.Exec(dropCtx, fmt.Sprintf(`DROP DATABASE IF EXISTS %s WITH (FORCE)`, name))
+		if _, err := conn.Exec(dropCtx, fmt.Sprintf(`DROP DATABASE IF EXISTS %s WITH (FORCE)`, name)); err != nil {
+			t.Logf("testenv: drop database %s: %v", name, err)
+		}
 	})
 
 	host, port := e.Postgres.Host, e.Postgres.Port
