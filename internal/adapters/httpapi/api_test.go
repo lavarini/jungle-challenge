@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lavarini/backend-challenge-go/internal/app"
 	"github.com/lavarini/backend-challenge-go/internal/money"
@@ -300,5 +302,39 @@ func TestBodyLimit(t *testing.T) {
 	huge := `{"providerId":"` + strings.Repeat("a", 70<<10) + `"}`
 	if rec := f.do(http.MethodPost, "/wagering/transactions", "provider-a", huge, idem); rec.Code != http.StatusBadRequest {
 		t.Fatalf("oversized body: %d", rec.Code)
+	}
+}
+
+// stuckSubmitter blocks like a query on a database that stopped answering
+// (TCP open, no reply) and returns what the postgres adapter makes of the
+// context error once it expires.
+type stuckSubmitter struct{}
+
+func (stuckSubmitter) Execute(ctx context.Context, _ app.SubmitCommand) (app.SubmitResult, error) {
+	<-ctx.Done()
+	return app.SubmitResult{}, fmt.Errorf("%w: %w", app.ErrTransient, ctx.Err())
+}
+
+func TestRequestTimeoutAnswersRetryable503WhenTheDatabaseHangs(t *testing.T) {
+	h := NewHandler(Deps{
+		Verifier:    fakeVerifier{"provider-a": {ProviderID: "provider-a", ClientID: "provider-a", Roles: []app.Role{app.RoleProvider}}},
+		SubmitWager: stuckSubmitter{}, Readiness: fakeReady{},
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		RequestTimeout: 50 * time.Millisecond,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/wagering/transactions", strings.NewReader(betBody("provider-a")))
+	req.Header.Set("Authorization", "Bearer provider-a")
+	req.Header.Set("Idempotency-Key", "provider-a:transaction-123")
+	rec := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() { h.ServeHTTP(rec, req); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler still blocked: no per-request deadline reaches the database call")
+	}
+	if rec.Code != http.StatusServiceUnavailable || problemCode(t, rec) != "SERVICE_UNAVAILABLE" || rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("got %d %s, want retryable 503", rec.Code, rec.Body.String())
 	}
 }

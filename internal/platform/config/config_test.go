@@ -28,7 +28,8 @@ func TestLoadDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c.Role != RoleAll || c.HTTPAddr != ":8080" || c.Database.LockTimeout != 2*time.Second ||
-		c.OIDC.Audience != "wagering-api" || c.OIDC.DiscoveryURL != c.OIDC.IssuerURL || c.ShutdownTimeout != 25*time.Second {
+		c.OIDC.Audience != "wagering-api" || c.OIDC.DiscoveryURL != c.OIDC.IssuerURL || c.ShutdownTimeout != 25*time.Second ||
+		c.RequestTimeout != 10*time.Second {
 		t.Fatalf("defaults %+v", c)
 	}
 }
@@ -47,10 +48,11 @@ func TestLoadReportsEveryMissingVariable(t *testing.T) {
 
 func TestLoadRejectsInvalidValues(t *testing.T) {
 	cases := map[string]string{
-		"WAGERD_ROLE":      "everything",
-		"DB_LOCK_TIMEOUT":  "soon",
-		"DB_MAX_CONNS":     "-1",
-		"SQS_MAX_RECEIVES": "0",
+		"WAGERD_ROLE":          "everything",
+		"DB_LOCK_TIMEOUT":      "soon",
+		"DB_MAX_CONNS":         "-1",
+		"SQS_MAX_RECEIVES":     "0",
+		"HTTP_REQUEST_TIMEOUT": "0s",
 	}
 	for k, v := range cases {
 		if _, err := Load(env(map[string]string{k: v})); err == nil {

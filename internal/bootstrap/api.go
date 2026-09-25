@@ -32,11 +32,11 @@ func newVerifier(cfg config.Config) (*oidc.Verifier, error) {
 	})
 }
 
-func newHandler(v *oidc.Verifier, open *app.OpenWallet, get *app.GetWallet, submit metered.Submitter, tx *app.GetTransaction, ledger *app.ListLedger, rec *app.Reconcile, r *health.Readiness, l *slog.Logger) http.Handler {
+func newHandler(cfg config.Config, v *oidc.Verifier, open *app.OpenWallet, get *app.GetWallet, submit metered.Submitter, tx *app.GetTransaction, ledger *app.ListLedger, rec *app.Reconcile, r *health.Readiness, l *slog.Logger) http.Handler {
 	return httpapi.NewHandler(httpapi.Deps{
 		Verifier: v, OpenWallet: open, GetWallet: get, SubmitWager: submit,
 		Transactions: tx, Ledger: ledger, Reconcile: rec,
-		Readiness: r, Logger: l,
+		Readiness: r, Logger: l, RequestTimeout: cfg.RequestTimeout,
 	})
 }
 
@@ -47,7 +47,9 @@ func runHTTPServer(lc fx.Lifecycle, cfg config.Config, h http.Handler, d *drain,
 	srv := &http.Server{
 		Addr: cfg.HTTPAddr, Handler: h,
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
-		WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second,
+		// The write deadline leaves room to send the 503 once the request
+		// deadline fires.
+		WriteTimeout: cfg.RequestTimeout + 5*time.Second, IdleTimeout: 60 * time.Second,
 	}
 	lc.Append(fx.StartHook(func() error {
 		ln, err := net.Listen("tcp", srv.Addr)

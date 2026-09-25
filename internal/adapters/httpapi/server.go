@@ -6,6 +6,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/lavarini/backend-challenge-go/internal/app"
 	"github.com/lavarini/backend-challenge-go/internal/platform/health"
@@ -55,6 +56,10 @@ type Deps struct {
 	Reconcile    WalletReconciler
 	Readiness    ReadinessChecker
 	Logger       *slog.Logger
+	// RequestTimeout bounds every request's context, so a database that
+	// stops answering (connection open, no reply) surfaces as a retryable
+	// 503 before the caller gives up. Zero disables it.
+	RequestTimeout time.Duration
 }
 
 type api struct {
@@ -87,5 +92,5 @@ func NewHandler(d Deps) http.Handler {
 	mux.Handle("GET /providers/{providerId}/wagering/transactions/{externalTransactionId}", a.requireAny(a.getByExternalID, app.RoleProvider, app.RoleInternal))
 	mux.Handle("GET /wallets/{walletId}/ledger", a.require(app.RoleInternal, a.listLedger))
 	mux.Handle("POST /wallets/{walletId}/reconciliation", a.require(app.RoleInternal, a.reconcile))
-	return withCorrelation(withBodyLimit(mux))
+	return withCorrelation(withBodyLimit(withDeadline(d.RequestTimeout, mux)))
 }

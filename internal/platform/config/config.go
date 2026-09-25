@@ -85,6 +85,9 @@ type Config struct {
 	// outside the host network (ADR 0015).
 	AdminAddr       string
 	ShutdownTimeout time.Duration
+	// RequestTimeout bounds each HTTP request's context; a database that
+	// stops answering then yields a retryable 503 instead of a hung call.
+	RequestTimeout time.Duration
 	// ShutdownReadinessDelay is how long the process keeps serving after it
 	// starts reporting 503, so a load balancer sees not-ready before the port
 	// closes. 0 disables it (tests).
@@ -125,6 +128,7 @@ func Load(getenv func(string) string) (Config, error) {
 		HTTPAddr:        str("HTTP_ADDR", ":8080"),
 		AdminAddr:       str("ADMIN_ADDR", ":9090"),
 		ShutdownTimeout: duration("SHUTDOWN_TIMEOUT", "25s"),
+		RequestTimeout:  duration("HTTP_REQUEST_TIMEOUT", "10s"),
 		Database: DatabaseConfig{
 			URL:              required("DATABASE_URL"),
 			LockTimeout:      duration("DB_LOCK_TIMEOUT", "2s"),

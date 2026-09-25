@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -21,6 +22,21 @@ func withBodyLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 		next.ServeHTTP(w, r)
+	})
+}
+
+// withDeadline gives the request context a deadline. pgx honours it on a
+// connection that stopped answering, and the postgres adapter classifies the
+// resulting context error as transient, so the caller gets a retryable 503
+// instead of waiting on the database forever.
+func withDeadline(d time.Duration, next http.Handler) http.Handler {
+	if d <= 0 {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), d)
+		defer cancel()
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 

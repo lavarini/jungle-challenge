@@ -94,7 +94,7 @@ proibição de ponto flutuante nos caminhos de dinheiro.
 | Queda depois do commit, antes de remover a mensagem | reentrega respondida pelo inbox; nenhum débito novo |
 | Queda depois de publicar, antes de confirmar | lease expira; republicação com o mesmo `eventId`, deduplicada |
 | Queda depois de reclamar uma pendência | lease expira; outra instância retoma |
-| PostgreSQL indisponível | HTTP `503` com `retryable=true`; SQS devolve à fila com backoff; workers recuam |
+| PostgreSQL indisponível | HTTP `503` com `retryable=true` em até `HTTP_REQUEST_TIMEOUT` (10 s), prazo aplicado ao contexto de cada requisição, mesmo com o banco sem responder; o retry com a mesma chave aplica a operação uma vez (ou devolve o replay, se o commit tiver chegado antes do prazo); SQS devolve à fila com backoff; workers recuam |
 | SNS indisponível ou mal configurado | relay recua até cerca de 5 min (teto mais jitter) sem descartar; no boot recusa tópico inexistente ou não FIFO |
 | `SIGTERM` | prontidão vira 503; HTTP e workers drenam em paralelo; mensagem interrompida volta com visibilidade 0; pool fecha por último |
 
@@ -188,9 +188,11 @@ O enunciado deixa decisões em aberto; cada uma virou um ADR:
 
 ## Não concluído
 
-- Teste de indisponibilidade temporária do PostgreSQL e do SQS (enunciado §3): o comportamento —
-  `503` retentável, mensagem devolvida à fila, sem efeito duplicado — está implementado (ver
-  `Falhas`), mas ainda não é exercitado por um teste que pause o banco ou o broker de verdade.
+- Teste de indisponibilidade temporária do SQS (enunciado §3): a do PostgreSQL é exercitada por
+  `TestDatabaseOutageReturnsRetryable503WithoutDuplicateEffect` (`test/e2e/crash/outage_test.go`),
+  que pausa o container do banco; a do broker — mensagem devolvida à fila, sem efeito duplicado —
+  está implementada e coberta pela classificação e pelo consumidor, mas nenhum teste derruba o SQS
+  de verdade.
 - Um processo por papel, cada um com sua própria credencial AWS, não é exercitado no Compose (ver
   `Limitações conhecidas`); só o papel `all` roda ali.
 - Teste de carga (opcional, ver [ADR 0003](docs/adr/0003-execucao-em-fatias-verticais.md)).
