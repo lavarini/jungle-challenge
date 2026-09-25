@@ -13,15 +13,28 @@ import (
 
 const maxErrorLength = 1000
 
-// HeadsCTE selects the oldest unpublished, non-dead row of each partition:
-// the candidate heads a claim may lease. Exported so tests can compose the
-// exact production query around an injected delay instead of hand-copying
-// it: a query built from these
+// HeadsWith opens the claim's WITH clause with `heads`: the oldest
+// unpublished, non-dead row of each partition, the candidate heads a claim
+// may lease. It is a skip scan over outbox_unpublished_by_partition (one
+// index probe per partition), so its cost is bounded by the number of
+// partitions and does not depend on planner statistics. A recursive CTE is
+// evaluated once, never inlined or rescanned: the DISTINCT ON subquery it
+// replaced was rescanned once per pending row when the statistics still
+// described an empty outbox, making the claim quadratic in the backlog
+// (statement timeouts under load). Exported so tests can compose the exact
+// production query around an injected delay instead of hand-copying it
+// a query built from these
 // fragments can't silently drift from ClaimHeads.
-const HeadsCTE = `SELECT DISTINCT ON (partition_key) seq
-		FROM outbox_events
+const HeadsWith = `WITH RECURSIVE heads(partition_key, seq) AS (
+		(SELECT partition_key, seq FROM outbox_events
 		WHERE published_at IS NULL AND dead_at IS NULL
-		ORDER BY partition_key, seq`
+		ORDER BY partition_key, seq LIMIT 1)
+		UNION ALL
+		SELECT n.partition_key, n.seq FROM heads h CROSS JOIN LATERAL (
+			SELECT partition_key, seq FROM outbox_events
+			WHERE published_at IS NULL AND dead_at IS NULL AND partition_key > h.partition_key
+			ORDER BY partition_key, seq LIMIT 1) n
+	)`
 
 // DueRecheck re-applies the published_at/dead_at/lease predicate to each
 // snapshot head right before FOR UPDATE takes its lock. Under READ
@@ -33,13 +46,14 @@ const HeadsCTE = `SELECT DISTINCT ON (partition_key) seq
 const DueRecheck = `o.published_at IS NULL AND o.dead_at IS NULL
 		  AND o.next_attempt_at <= $1 AND (o.claim_expires_at IS NULL OR o.claim_expires_at < $1)`
 
-// claimHeadsSQL is ClaimHeads' query, assembled from HeadsCTE and DueRecheck
+// claimHeadsSQL is ClaimHeads' query, assembled from HeadsWith and DueRecheck
 // so both stay byte-identical to what a test composes from the same two
-// exported fragments.
-var claimHeadsSQL = `WITH heads AS (` + HeadsCTE + `), due AS (
+// exported fragments. `due` filters by the materialized array of head seqs
+// instead of joining `heads`, so no plan joins against the whole backlog.
+var claimHeadsSQL = HeadsWith + `, due AS (
 		SELECT o.seq
-		FROM outbox_events o JOIN heads h ON h.seq = o.seq
-		WHERE ` + DueRecheck + `
+		FROM outbox_events o
+		WHERE o.seq = ANY (ARRAY(SELECT seq FROM heads)) AND ` + DueRecheck + `
 		ORDER BY o.seq
 		LIMIT $2
 		FOR UPDATE OF o SKIP LOCKED

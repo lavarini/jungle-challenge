@@ -177,7 +177,7 @@ func TestTwoRelaysPublishEachWalletInCommitOrder(t *testing.T) {
 // concurrent relay Acks the head between this query's snapshot and its lock
 // attempt, the row must not be reclaimed and requeued.
 //
-// It runs ClaimHeads' own query, composed from the exported HeadsCTE and
+// It runs ClaimHeads' own query, composed from the exported HeadsWith and
 // DueRecheck fragments (outbox_store.go) instead of a hand copy, with one
 // test-only addition: a `slowed` CTE stage that pg_sleeps between the heads
 // snapshot and the due lock, to widen that otherwise microsecond-scale race
@@ -215,14 +215,14 @@ func TestClaimHeadsRechecksPublicationUnderConcurrentAck(t *testing.T) {
 	// in between the heads snapshot and the due lock: `slowed` pg_sleeps
 	// before `due` runs, widening the reclaim race deterministically. The
 	// CTE name `due` joins against is the only difference from
-	// outbox_store.claimHeadsSQL; HeadsCTE and DueRecheck are the same Go
+	// outbox_store.claimHeadsSQL; HeadsWith and DueRecheck are the same Go
 	// constants the production query uses, so this cannot drift from it.
-	slowClaimSQL := `WITH heads AS (` + postgres.HeadsCTE + `), slowed AS (
+	slowClaimSQL := postgres.HeadsWith + `, slowed AS (
 			SELECT seq FROM heads, pg_sleep(0.5)
 		), due AS (
 			SELECT o.seq
-			FROM outbox_events o JOIN slowed h ON h.seq = o.seq
-			WHERE ` + postgres.DueRecheck + `
+			FROM outbox_events o
+			WHERE o.seq = ANY (ARRAY(SELECT seq FROM slowed)) AND ` + postgres.DueRecheck + `
 			ORDER BY o.seq
 			LIMIT $2
 			FOR UPDATE OF o SKIP LOCKED
@@ -372,5 +372,67 @@ func TestPermanentFailureQuarantinesAndUnblocksThePartition(t *testing.T) {
 	}
 	if n := count(t, s.pool, `SELECT count(*) FROM outbox_events WHERE event_id = $1 AND published_at IS NOT NULL`, order[1]); n != 1 {
 		t.Fatal("the next event of the partition must be published after the quarantine")
+	}
+}
+
+// TestClaimHeadsStaysFastWithStaleStatistics reproduces the load-test stall:
+// right after startup the planner's statistics describe an empty (or fully
+// published) outbox, so it estimates one pending row and the old DISTINCT ON
+// heads subquery ended up rescanned once per pending row, quadratic in the
+// backlog (14.8 s for 6000 pending rows, SQLSTATE 57014 under the pool's
+// statement_timeout). The claim must stay bounded by the number of
+// partitions whatever the statistics say, and still return exactly the
+// oldest pending event of each partition.
+func TestClaimHeadsStaysFastWithStaleStatistics(t *testing.T) {
+	pg := testDatabase(t)
+	ctx := context.Background()
+	super := connect(t, pg.SuperDSN)
+	const partitions, perPartition = 50, 120
+	if _, err := super.Exec(ctx, `ALTER TABLE outbox_events SET (autovacuum_enabled = false)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := super.Exec(ctx, `ANALYZE outbox_events`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := super.Exec(ctx, `INSERT INTO outbox_events (event_id, partition_key, event_type, aggregate_id, payload, occurred_at, next_attempt_at)
+		SELECT gen_random_uuid(), 'wallet-' || (i % $1::int), 'test', 'agg', '{}'::jsonb, now(), now()
+		FROM generate_series(1, $1::int * $2::int) i`, partitions, perPartition); err != nil {
+		t.Fatal(err)
+	}
+
+	pool, err := postgres.NewPool(ctx, postgres.PoolConfig{
+		DSN: pg.AppDSN, MaxConns: 2, LockTimeout: time.Second, StatementTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+
+	msgs, err := postgres.NewOutboxStore(pool).ClaimHeads(ctx, time.Now(), 100, uuid.NewString(), time.Now().Add(30*time.Second))
+	if err != nil {
+		t.Fatalf("claim with stale statistics: %v", err)
+	}
+	want := map[int64]bool{}
+	rows, err := super.Query(ctx, `SELECT min(seq) FROM outbox_events GROUP BY partition_key`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var seq int64
+		if err := rows.Scan(&seq); err != nil {
+			t.Fatal(err)
+		}
+		want[seq] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != partitions {
+		t.Fatalf("claimed %d events, want one head per partition (%d)", len(msgs), partitions)
+	}
+	for _, m := range msgs {
+		if !want[m.Seq] {
+			t.Fatalf("claimed seq %d of %s, which is not its partition's oldest pending event", m.Seq, m.PartitionKey)
+		}
 	}
 }
