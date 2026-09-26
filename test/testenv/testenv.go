@@ -66,7 +66,7 @@ type Env struct {
 	Keycloak   Keycloak
 	LocalStack LocalStack
 
-	pg         testcontainers.Container
+	pg, ls     testcontainers.Container
 	containers []testcontainers.Container
 }
 
@@ -79,7 +79,7 @@ func Start(ctx context.Context) (*Env, error) {
 	g.Go(func() (err error) { kc, err = startKeycloak(gctx, env); return err })
 	g.Go(func() (err error) { ls, err = startLocalStack(gctx, env); return err })
 	err := g.Wait()
-	env.pg = pg
+	env.pg, env.ls = pg, ls
 	for _, c := range []testcontainers.Container{pg, kc, ls} {
 		if c != nil {
 			env.containers = append(env.containers, c)
@@ -94,6 +94,9 @@ func Start(ctx context.Context) (*Env, error) {
 
 // PostgresContainerID lets failure tests pause the database with the Docker CLI.
 func (e *Env) PostgresContainerID() string { return e.pg.GetContainerID() }
+
+// LocalStackContainerID lets failure tests pause SQS and SNS with the Docker CLI.
+func (e *Env) LocalStackContainerID() string { return e.ls.GetContainerID() }
 
 func (e *Env) Terminate(ctx context.Context) {
 	for _, c := range e.containers {

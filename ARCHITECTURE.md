@@ -236,6 +236,7 @@ Os detalhes estão em [ADR 0013](docs/adr/0013-dlq-explicita-para-mensagem-inval
 | Queda depois de publicar, antes de confirmar | lease expira; republicação com o mesmo `eventId`, deduplicada |
 | Queda depois de reclamar uma pendência | lease expira; outra instância retoma |
 | PostgreSQL indisponível | HTTP `503` com `retryable=true` em até `HTTP_REQUEST_TIMEOUT` (10 s), prazo aplicado ao contexto de cada requisição, mesmo com o banco sem responder; o retry com a mesma chave aplica a operação uma vez (ou devolve o replay, se o commit tiver chegado antes do prazo); SQS devolve à fila com backoff; workers recuam |
+| SQS e SNS indisponíveis (LocalStack pausado) | os processos continuam de pé com `/health/ready` em `503`; a API segue aceitando operações, porque o banco está de pé, e os eventos delas esperam na outbox sem quarentena; na volta, a fila é consumida, a mensagem duplicada é aplicada uma vez e tudo o que foi confirmado é publicado (`TestQueueOutageKeepsProcessesUpAndLosesNothing`) |
 | SNS indisponível ou mal configurado | relay recua até cerca de 5 min (teto mais jitter) sem descartar; no boot recusa tópico inexistente ou não FIFO |
 | `SIGTERM` | prontidão vira 503; HTTP e workers drenam em paralelo; mensagem interrompida volta com visibilidade 0; pool fecha por último |
 
@@ -352,11 +353,6 @@ atual:
 
 ## Não concluído
 
-- Teste de indisponibilidade temporária do SQS (enunciado §3): a do PostgreSQL é exercitada por
-  `TestDatabaseOutageReturnsRetryable503WithoutDuplicateEffect` (`test/e2e/crash/outage_test.go`),
-  que pausa o container do banco; a do broker — mensagem devolvida à fila, sem efeito duplicado —
-  está implementada e coberta pela classificação e pelo consumidor, mas nenhum teste derruba o SQS
-  de verdade.
 - Um processo por papel, cada um com sua própria credencial AWS, não é exercitado no Compose (ver
   `Limitações conhecidas`); só o papel `all` roda ali.
 - Tracing com OpenTelemetry e dashboards (diferenciais opcionais do enunciado).
