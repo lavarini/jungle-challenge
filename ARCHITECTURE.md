@@ -87,6 +87,147 @@ proibição de ponto flutuante nos caminhos de dinheiro.
 | Autorização por rota e isolamento entre providers | OIDC fail-closed; leitura fora do escopo responde 404 | [0015](docs/adr/0015-oidc-fail-closed-e-politica-por-rota.md) |
 | Privilégio mínimo na AWS | uma política IAM por papel, conferida por teste contra a tabela de ações de cada papel, sem curinga | [0016](docs/adr/0016-credenciais-do-broker-e-vinculo-do-remetente.md) |
 
+## Dinheiro e persistência
+
+- **`Money`** é um value object imutável com `int64` em centavos e moeda ISO 4217. A entrada
+  externa só aceita a forma canônica `^(0|[1-9][0-9]*)\.[0-9]{2}$`. Vazio, sinal, `NaN`,
+  `Infinity`, notação científica e escala diferente de duas casas são rejeitados, sem arredondar.
+  O limite é o de `int64` (92.233.720.368.547.758,07). Parsing, soma, subtração e negação recusam
+  overflow com erro, e aritmética entre moedas diferentes também é erro
+  ([ADR 0006](docs/adr/0006-money-canonico-estrito.md)).
+- **No banco**, o valor fica em `amount_minor BIGINT` (e `balance_minor`, `balance_before`,
+  `balance_after`) mais `currency CHAR(3)`. Nenhuma coluna é `NUMERIC` ou `REAL`. A única soma
+  agregada, a da reconciliação, é lida como `numeric` e convertida com checagem de overflow.
+- **Biblioteca:** `pgx` v5 com SQL explícito, sem ORM. As migrations usam `golang-migrate`,
+  embutidas no binário (`wagerd migrate up|down`).
+- **Delimitação da transação:** o caso de uso recebe a porta `app.UnitOfWork`. `Do(ctx, fn)` abre
+  uma transação `READ COMMITTED`, e `fn` obtém todos os repositórios (`Wallets`, `Transactions`,
+  `Ledger`, `Outbox`, `Inbox`) do mesmo `app.Tx`
+  (`internal/adapters/postgres/uow.go`). Nenhum repositório abre transação própria, então saldo,
+  ledger, transação, outbox e inbox entram no mesmo commit ou nenhum entra. Cada sessão carrega
+  `lock_timeout` (2 s) e `statement_timeout` (5 s).
+- **Roles:** `wager_migrator` é dono do schema e só roda migrations. `wager_app` é o runtime, com
+  `UPDATE` restrito por coluna e sem `UPDATE`/`DELETE` no ledger. As duas são criadas por
+  `deploy/postgres/init.sql`.
+
+## Concorrência
+
+A estratégia é **locking pessimista por carteira**: `SELECT … FOR UPDATE` na linha da carteira no
+início de toda operação que pode movê-la. Duas operações da mesma carteira são serializadas, e
+carteiras diferentes nunca disputam o mesmo lock (não há lock global nem advisory lock).
+
+- Controle otimista foi descartado porque, com disputa na mesma carteira, ele gera retries e
+  latência imprevisível no caminho financeiro. `UPDATE … WHERE balance >= amount` resolve o débito,
+  mas não serializa a leitura de referência e de idempotência da mesma carteira. O lock de linha
+  custa uma espera curta limitada por `lock_timeout`, e o estouro desse prazo vira `503`
+  retentável.
+- **Segunda linha de defesa no banco**, independente do lock: `UNIQUE (wallet_id, wallet_version)`
+  no ledger e um constraint trigger diferido exigem `version = old + 1` e um lançamento coerente
+  para cada mudança de saldo. Um lost update, mesmo que o código perdesse o lock, falharia no
+  commit.
+- A idempotência é conferida antes do lock (caminho rápido do replay) e de novo depois dele, já
+  serializada pela carteira. Uma violação de unicidade no commit faz rollback e um único retry,
+  que vira replay.
+- Os workers reivindicam trabalho com `FOR UPDATE SKIP LOCKED` e lease, então várias instâncias
+  dividem a fila sem coordenação em memória.
+
+Provas: `TestTwoConcurrentBetsAcrossProcesses` (80+80 sobre 100 com três processos),
+`TestDistinctWalletsProgressWhileOneIsLocked` e `TestFiftyIdenticalBetsAcrossProcesses`
+([ADR 0008](docs/adr/0008-processamento-sincrono-e-ordem-de-locks.md)).
+
+## Idempotência e hash do payload
+
+- Chave persistente `UNIQUE (provider_id, idempotency_key)` e operação única
+  `UNIQUE (provider_id, external_id)`. Ambas incluem o provedor, então um provedor não consegue
+  fazer replay da operação de outro.
+- **Hash:** SHA-256 do JSON canônico com chaves ordenadas (`internal/app/hash.go`). Os campos são
+  `providerId`, `externalTransactionId`, `playerId`, `walletId`, `roundId`, `gameId`, `kind`,
+  `money{amount,currency}` e, quando existe, `referenceExternalTransactionId`. Ficam de fora a
+  `Idempotency-Key`, o `messageId`, o `correlationId` e os headers. HTTP e SQS montam o mesmo
+  comando e chamam a mesma função, então a mesma operação tem o mesmo hash pelos dois canais.
+  Como `Money` só aceita a forma canônica, não há normalização prévia.
+- **Replay** devolve o resultado persistido (`result_balance_minor`, `result_wallet_version`,
+  estado e `failureCode`) com `idempotentReplay: true`, mesmo que a carteira tenha mudado depois.
+- Na fila, a inbox `(consumer_name, message_id)` guarda o hash da mensagem. Uma reentrega com
+  hash diferente vai para a DLQ como `INBOX_PAYLOAD_MISMATCH`.
+
+## Máquina de estados de `WagerTransaction`
+
+```text
+            ┌──────────────► PROCESSED   (terminal)
+PENDING ────┼──────────────► REJECTED    (terminal, failureCode)
+(memória)   └─► PENDING_REFERENCE ──┬──► PROCESSED
+                  ▲       │         ├──► REJECTED    (inclusive REFERENCE_NOT_FOUND no prazo)
+                  └───────┘         └──► FAILED      (terminal, INVARIANT_VIOLATION)
+                 reagendamento
+```
+
+- As transições são métodos do agregado (`Process`, `Reject`, `AwaitReference`, `Reschedule`,
+  `Fail`, em `internal/wagering/transaction.go`). Um estado terminal recusa qualquer transição com
+  `ErrTerminal`, e o banco reforça isso com o trigger `wager_transactions_guard`.
+- `PENDING` existe só em memória, e o motivo está em "Interpretações adotadas".
+- **Transitório x permanente:** indisponibilidade do banco ou do broker, `lock_timeout`,
+  `statement_timeout` e commit ambíguo são sempre transitórios (`503` retentável, retry na fila,
+  recuo nos workers) e nunca mudam o estado. Permanente é a entrada que nenhum retry corrige (ela
+  vai para a DLQ com motivo) ou o banco recusar algo que o domínio aprovou, o que leva a `FAILED`
+  ([ADR 0011](docs/adr/0011-failed-e-violacao-de-invariante.md)).
+
+### Códigos de falha
+
+| Classe | Códigos | Persiste | HTTP |
+|---|---|---|---|
+| Rejeição definitiva de negócio | `BET_INSUFFICIENT_FUNDS`, `REVERSAL_INSUFFICIENT_FUNDS`, `REVERSAL_ALREADY_APPLIED`, `REFERENCE_MISMATCH`, `REFERENCE_NOT_PROCESSED`, `REFERENCE_NOT_FOUND` | sim, `REJECTED` + evento; o replay devolve a mesma rejeição | `422` |
+| Entrada corrigível | `INVALID_REQUEST`, `WALLET_MISMATCH`, `WALLET_NOT_FOUND` | não; a chave continua livre | `400` / `404` |
+| Conflito | `IDEMPOTENCY_PAYLOAD_MISMATCH`, `IDEMPOTENCY_KEY_MISMATCH`, `WALLET_ALREADY_EXISTS` | não | `409` |
+| Autenticação e autorização | `UNAUTHENTICATED`, `FORBIDDEN`, `PROVIDER_MISMATCH` | não | `401` / `403` |
+| Transitório | `SERVICE_UNAVAILABLE` (`retryable: true`, `Retry-After`) | não | `503` |
+| Invariante | `INVARIANT_VIOLATION` | `FAILED` no caminho assíncrono | `500` |
+
+O corpo de erro é `application/problem+json` com `code` e `retryable`
+([`docs/openapi.yaml`](docs/openapi.yaml),
+[ADR 0009](docs/adr/0009-rejeicao-corrigivel-e-definitiva.md)). A aposta sem saldo e a reversão
+sem saldo têm códigos distintos.
+
+## Mensageria: limites e retries
+
+| Item | Valor |
+|---|---|
+| Visibility timeout / long polling / lote | 30 s / 20 s / até 10 mensagens |
+| Retry transitório | `ChangeMessageVisibility` com `min(2^n s, 60 s)`, sendo `n` o `ApproximateReceiveCount` |
+| Tentativas | `SQS_MAX_RECEIVES = 5`; depois disso o consumidor envia à DLQ com `failureCode=RETRIES_EXHAUSTED` |
+| Redrive nativo | `maxReceiveCount = 20`, só como rede de segurança |
+| Mensagem inválida ou não autorizada | vai direto à DLQ com atributos `failureCode` e `reason` (`INVALID_MESSAGE`, `PROVIDER_NOT_AUTHORIZED`, `WALLET_NOT_FOUND`, `WALLET_MISMATCH`, `IDEMPOTENCY_*`, `INBOX_PAYLOAD_MISMATCH`, `INVARIANT_VIOLATION`) |
+| Ordem e deduplicação | `MessageGroupId = walletId`, `MessageDeduplicationId = messageId`; grupos em paralelo, sequencial dentro do grupo; a correção vem do banco, não do FIFO |
+| Outbox | lease de 30 s; backoff com jitter até 5 min, sem descartar em erro transitório; erro permanente de formato vai à quarentena (`dead_at`) após 5 tentativas |
+
+Os detalhes estão em [ADR 0013](docs/adr/0013-dlq-explicita-para-mensagem-invalida.md),
+[`docs/eventos.md`](docs/eventos.md) e no [RUNBOOK](docs/RUNBOOK.md).
+
+## Autenticação e autorização
+
+- **IdP: Keycloak**, recomendado pelo enunciado. É OIDC padrão, roda no Compose e importa o realm
+  (`deploy/keycloak/realm-wagering.json`) no boot, então clients, roles e mappers são reproduzíveis
+  a partir de um checkout limpo. Outro IdP OIDC serviria se emitisse `provider_id` e as roles em
+  `realm_access.roles` (formato do Keycloak), ou com um ajuste no mapeamento de claims do verifier
+  (`internal/adapters/oidc`).
+- **Credenciais:** `client_credentials` por serviço. Cada provedor tem um client com o claim
+  `provider_id` fixado por mapper e a role `wager:provider`. O serviço interno tem a role
+  `wallet:internal`. `aud = wagering-api`.
+- **Validação:** `go-oidc` com discovery e JWKS em cache, só `RS256`, conferindo `iss`, `aud`,
+  `exp` e `nbf` com 30 s de tolerância. É fail-closed: sem configuração ou sem discovery no boot, o
+  processo não sobe, e não existe modo sem autenticação.
+- **Permissões:** o `providerId` vem só do token, nunca de header nem do corpo.
+  - `wallet:internal` opera carteiras (abertura, leitura, ledger, reconciliação) e lê todas as
+    transações, mas não submete apostas.
+  - `wager:provider` submete e lê só as próprias transações. Um corpo com outro `providerId` recebe
+    `403 PROVIDER_MISMATCH` antes de qualquer I/O. Uma transação de outro provedor lida por id
+    responde `404`, e o path de outro provedor responde `403`.
+  - Toda recusa é testada com tokens reais e não deixa nenhuma linha nova no banco
+    ([ADR 0015](docs/adr/0015-oidc-fail-closed-e-politica-por-rota.md)).
+- **Broker:** a fila não carrega token. O consumidor vincula o `SenderId` da mensagem (uma
+  credencial AWS por provedor) ao `providerId` do envelope, e as políticas IAM por papel estão em
+  `deploy/iam/` ([ADR 0016](docs/adr/0016-credenciais-do-broker-e-vinculo-do-remetente.md)).
+
 ## Falhas
 
 | Situação | Comportamento |
@@ -147,6 +288,12 @@ O enunciado deixa decisões em aberto; cada uma virou um ADR:
   (`25.00`, duas casas, sem sinal nem notação científica); não há forma equivalente a normalizar, e
   o hash de idempotência cobre exatamente os bytes aceitos
   ([ADR 0006](docs/adr/0006-money-canonico-estrito.md)).
+- **`PENDING` só em memória.** Toda transação nasce `PENDING` no domínio, mas as operações sem
+  dependência pendente são decididas e confirmadas num único commit, já no estado final, como a
+  §6.3 permite ("sem commit intermediário de aceite"). Por isso o `CHECK` de `status` não aceita
+  `PENDING`: não existe `PENDING` confirmado sem retomada. O único estado não terminal persistido
+  é `PENDING_REFERENCE`, que tem retomada durável por qualquer instância
+  ([ADR 0008](docs/adr/0008-processamento-sincrono-e-ordem-de-locks.md)).
 - **Outra chave para a mesma operação é conflito.** Reenviar `(providerId, externalTransactionId)`
   com uma `Idempotency-Key` diferente da primeira vez não cria uma operação nova: é
   `409 IDEMPOTENCY_KEY_MISMATCH`
@@ -168,6 +315,20 @@ O enunciado deixa decisões em aberto; cada uma virou um ADR:
 - **Vínculo remetente→provedor na fila.** A entrada SQS não carrega token OIDC; o consumidor casa o
   `SenderId` da mensagem — uma credencial por provedor — com o `providerId` do envelope antes de
   processar ([ADR 0016](docs/adr/0016-credenciais-do-broker-e-vinculo-do-remetente.md)).
+
+## Evolução para produção
+
+Não implementado, porque está fora do escopo do desafio. É o caminho natural a partir do desenho
+atual:
+
+- Um deployment por papel (`api`, `consumer`, `outbox-relay`, `reference-worker`), cada um com sua
+  role IAM, já escrita em `deploy/iam/`, e escala independente.
+- Segredos (client secrets do IdP, senha de `wager_app`) no AWS Secrets Manager, em vez de
+  variáveis de ambiente.
+- TLS no ingress, com as métricas e o `pprof` só na rede interna, como já acontece com a porta
+  administrativa.
+- Tracing com OpenTelemetry, propagando o `correlationId` que já atravessa HTTP, SQS, outbox e
+  SNS.
 
 ## Limitações conhecidas
 

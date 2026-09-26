@@ -16,6 +16,35 @@ SNS FIFO e invariantes financeiras impostas no PostgreSQL. O enunciado está em
 | [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | o que fazer com DLQ, quarentena, `FAILED`, divergência, pendência e backlog |
 | [`docs/design.md`](docs/design.md) | desenho da solução |
 
+## Roteiro de avaliação
+
+Onde está a prova de cada critério da §14 do enunciado. A lista completa, com o resultado da
+última execução, está em [`docs/EVIDENCIAS.md`](docs/EVIDENCIAS.md).
+
+| Critério | Onde olhar | Testes principais |
+|---|---|---|
+| Integridade financeira | [Dinheiro e persistência](ARCHITECTURE.md#dinheiro-e-persistência), `migrations/000001_initial_schema.up.sql` (constraints e triggers) | `TestBalanceCannotGoNegative`, `TestLedgerIsAppendOnlyEvenForOwner`, `TestRefundAndRollbackShareOneReversalSlot`, `TestReconciliationMatchesTheLedger` |
+| Concorrência | [Concorrência](ARCHITECTURE.md#concorrência), [ADR 0008](docs/adr/0008-processamento-sincrono-e-ordem-de-locks.md) | `TestTwoConcurrentBetsAcrossProcesses`, `TestDistinctWalletsAcrossProcesses` |
+| Idempotência | [Idempotência e hash](ARCHITECTURE.md#idempotência-e-hash-do-payload), [ADR 0007](docs/adr/0007-outra-chave-para-mesma-operacao-e-conflito.md) | `TestFiftyIdenticalBetsAcrossProcesses`, `TestFiftyMixedHTTPAndSQSDuplicates`, `TestRestartPreservesIdempotencyAndPendingOperations` |
+| Mensageria e recuperação | [Mensageria](ARCHITECTURE.md#mensageria-limites-e-retries), [ADR 0014](docs/adr/0014-relay-da-outbox-por-cabeca-de-particao.md), [`docs/eventos.md`](docs/eventos.md) | `TestConsumerCrashAfterCommitIsRedeliveredWithoutDoubleDebit`, `TestRelayCrashAfterPublishIsRepublishedWithTheSameEventID`, `TestPendingExpiresAsReferenceNotFound`, `TestSIGTERMDrainsAndExitsCleanly` |
+| Modelagem e arquitetura | [ARCHITECTURE.md](ARCHITECTURE.md), `internal/archtest` (regra de dependência), [Autenticação e autorização](ARCHITECTURE.md#autenticação-e-autorização) | `TestFxLifecycleStartsServesAndStopsCleanly`, `TestAuthorizationByRoute` |
+| Testes | [Testes: dependências e build tags](#testes-dependências-e-build-tags), CI | suítes `integration`, `e2e` e `crash` com containers reais e três processos |
+| Observabilidade | [Métricas e pprof](#métricas-e-pprof), [RUNBOOK](docs/RUNBOOK.md) | `TestEveryMetricIsExposedWithItsLabelsOnly` |
+| Documentação | este README, [ARCHITECTURE.md](ARCHITECTURE.md), [ADRs](docs/adr/README.md) | `make smoke` a partir de um checkout limpo |
+
+| Critério eliminatório | Por que não se aplica |
+|---|---|
+| Endpoint de negócio sem autenticação efetiva | OIDC fail-closed com tokens reais do Keycloak: `TestAuthorizationByRoute`, `TestKeycloakExpiredTokenIsRejected` |
+| Acesso não autorizado a operações ou transações | escopo por provedor e zero linhas em recusas: `TestTransactionReadsRespectProviderScope`, `TestAuthorizationRefusalsHaveNoFinancialEffect` |
+| Dinheiro em ponto flutuante | `int64` em centavos; `TestNoFloatInMoneyPaths` falha se algum caminho de dinheiro usar float |
+| Saldo negativo por concorrência | lock por carteira mais `CHECK` e trigger no banco: `TestTwoConcurrentBetsAcrossProcesses`, `TestBalanceCannotGoNegative` |
+| Movimentação duplicada | idempotência e inbox no mesmo commit: `TestFiftyMixedHTTPAndSQSDuplicates` |
+| Idempotência só em memória | `TestRestartPreservesIdempotencyAndPendingOperations` reinicia os processos |
+| Dependência de uma única instância | a suíte `e2e` roda três processos `wagerd` independentes |
+| Publicação antes do commit | outbox transacional: `TestOpenWalletCommitsOpeningLedgerAndEvents`, `TestRelayCrashAfterPublishIsRepublishedWithTheSameEventID` |
+| Ledger não auditável | append-only até para o dono: `TestLedgerIsAppendOnlyEvenForOwner`, `TestReconciliationMatchesTheLedger` |
+| PostgreSQL, SQS e IdP trocados por mocks | testcontainers com PostgreSQL, Keycloak e LocalStack reais |
+
 ## Pré-requisitos
 
 - Go 1.27.x
