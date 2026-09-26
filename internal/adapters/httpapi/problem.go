@@ -56,8 +56,6 @@ func (a *api) writeError(w http.ResponseWriter, r *http.Request, err error) {
 		writeProblem(w, http.StatusBadRequest, "WALLET_MISMATCH", err.Error(), false, "")
 	case errors.Is(err, app.ErrInvalidInput):
 		writeProblem(w, http.StatusBadRequest, "INVALID_REQUEST", err.Error(), false, "")
-	case errors.Is(err, app.ErrNotImplemented):
-		writeProblem(w, http.StatusNotImplemented, "NOT_IMPLEMENTED", err.Error(), false, "")
 	case errors.Is(err, app.ErrTransient), errors.Is(err, app.ErrUniqueConflict):
 		a.log.WarnContext(r.Context(), "transient failure", "correlationId", correlationID(r.Context()), "error", err.Error(), "class", "transient")
 		writeProblem(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "temporarily unavailable; retry with the same idempotency key", true, "")

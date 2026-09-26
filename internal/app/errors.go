@@ -16,7 +16,6 @@ var (
 	ErrUniqueConflict      = errors.New("concurrent unique conflict")
 	ErrTransient           = errors.New("transient infrastructure failure")
 	ErrInvariantViolation  = errors.New("database invariant violation")
-	ErrNotImplemented      = errors.New("not implemented")
 	ErrUnauthenticated     = errors.New("unauthenticated")
 	ErrTransactionNotFound = errors.New("transaction not found")
 )

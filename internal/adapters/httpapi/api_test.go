@@ -233,7 +233,6 @@ func TestErrorMapping(t *testing.T) {
 		{&app.KeyMismatchError{ExistingTransactionID: "t9"}, 409, "IDEMPOTENCY_KEY_MISMATCH", false},
 		{app.ErrTransient, 503, "SERVICE_UNAVAILABLE", true},
 		{app.ErrUniqueConflict, 503, "SERVICE_UNAVAILABLE", true},
-		{app.ErrNotImplemented, 501, "NOT_IMPLEMENTED", false},
 		{app.ErrInvariantViolation, 500, "INVARIANT_VIOLATION", false},
 		{errors.New("boom"), 500, "INTERNAL_ERROR", false},
 	}
